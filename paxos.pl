@@ -42,6 +42,8 @@
             paxos_set/3,                        % +Key, +Value, +Options
             paxos_on_change/2,                  % ?Term, +Goal
             paxos_on_change/3,                  % ?Key, ?Value, +Goal
+
+            paxos_initialize/1,			% +Options
                                                 % Hook support
             paxos_replicate_key/3               % +Nodes, ?Key, +Options
           ]).
@@ -150,6 +152,29 @@ c_element([New | More], _Old, New) :-
     forall(member(N, More), N == New),
     !.
 c_element(_List, Old, Old).
+
+%!  paxos_initialize(+Options) is det.
+%
+%   Initialize this Prolog process as a   paxos node. The initialization
+%   requires an initialized and configured TIPC,  UDP or other broadcast
+%   protocol. Calling this initialization may be  omitted, in which case
+%   the equivant of paxos_initialize([]) is executed   lazily as part of
+%   the first paxos operation.  Defined options:
+%
+%     - node(?NodeID)
+%     When instantiated, this node rejoins the network with the given
+%     node id. A fixed node idea should be used if the node is
+%     configured for persistency and causes the new node to receive
+%     updates for keys that have been created or modified since the
+%     node left the network.  If NodeID is a variable it is unified
+%     with the discovered NodeID.
+%
+%     NodeID must be a small non-negative integer as these identifiers
+%     are used in bitmaps.
+
+paxos_initialize(Options) :-
+    option(node(Node), Options, Node),
+    node(Node).
 
 %!  paxos_initialize is det.
 %
