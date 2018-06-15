@@ -23,8 +23,8 @@
 \begin{abstract}
 This package provides the library \file{paxos.pl} that implements a
 replicating key-value store of Prolog terms on top of SWI-Prolog
-\pllib{broadcast} libraries and its TIPC or UDP based extension to
-broadcast outside the process using networking.
+\pllib{broadcast} libraries and its TIPC or UDP based extension that
+allow broadcasting outside the process using networking.
 \end{abstract}
 
 \pagebreak
