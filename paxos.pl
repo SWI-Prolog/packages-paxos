@@ -140,6 +140,10 @@ identical for all attentive members of the quorum.|_
            "Max time to wait for a response").
 :- setting(replication_rate, number, 1000,
            "Number of keys replicated per second").
+:- setting(death_half_life, number, 10,
+           "Half-time for failure score").
+:- setting(death_score, number, 100,
+           "Number of keys replicated per second").
 
 
 %!  paxos_initialize(+Options) is det.
@@ -317,21 +321,28 @@ paxos_rejoin :-
         ),
     !.
 
-%!  paxos_leave
+%!  paxos_leave is det.
+%!  paxos_leave(+Node) is det.
 %
-%   Leave the network.  Currently called from at_halt/1.
+%   Leave the network.  The  predicate   paxos_leave/0  is  called  from
+%   at_halt/1 to ensure the node is  deleted   as  the process dies. The
+%   paxos_leave/1 version is called  to  discard   other  nodes  if they
+%   repeatedly did not respond to queries.
 
 :- at_halt(paxos_leave).
 
 paxos_leave :-
     node(Node),
-    !,
-    paxos_update_set(quorum, del(Node)),
-    paxos_update_set(dead,   add(Node)),
+    paxos_leave(Node),
     Set is 1<<Node,
     paxos_message(forget(Set), -, Forget),
     broadcast(Forget).
-paxos_leave.
+
+paxos_leave(Node) :-
+    !,
+    paxos_update_set(quorum, del(Node)),
+    paxos_update_set(dead,   add(Node)).
+paxos_leave(_).
 
 paxos_update_set(Set, How) :-
     repeat,
@@ -389,11 +400,18 @@ consider_dead(Failed) :-
 consider_dead1(Node) :-
     clause(failed(Node, Last, Score), true, Ref),
     !,
+    setting(death_half_life, HalfLife),
+    setting(death_score, DeathScore),
     get_time(Now),
     Passed is Now-Last,
-    NewScore is Score*(2**(-Passed/60)) + 10,
+    NewScore is Score*(2**(-Passed/HalfLife)) + 10,
     asserta(failed(Node, Now, NewScore)),
-    erase(Ref).
+    erase(Ref),
+    (   NewScore < DeathScore
+    ->  debug(paxos(node), 'Consider node ~d dead', [Node]),
+        paxos_leave(Node)
+    ;   true
+    ).
 consider_dead1(Node) :-
     get_time(Now),
     asserta(failed(Node, Now, 10)).
