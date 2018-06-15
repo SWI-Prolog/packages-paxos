@@ -130,9 +130,7 @@ identical for all attentive members of the quorum.|_
     paxos_on_change(?, ?, 0).
 
 :- multifile
-    paxos_message_hook/3,               % +PaxOS, +TimeOut, -Message
-    node/1,                             % NodeID
-    quorum/1.                           % Quorum bitmask
+    paxos_message_hook/3.               % +PaxOS, +TimeOut, -Message
 
 :- setting(max_sets, nonneg, 20,
            "Max Retries to get to an agreement").
@@ -140,18 +138,9 @@ identical for all attentive members of the quorum.|_
            "Max Retries to get a value from the forum").
 :- setting(response_timeout, float, 0.020,
            "Max time to wait for a response").
+:- setting(replication_rate, number, 1000,
+           "Number of keys replicated per second").
 
-
-%!  c_element(+NewList, +Old, -Value)
-%
-%   A Muller c-element is a logic block  used in asynchronous logic. Its
-%   output assumes the value of its  input   iff  all  of its inputs are
-%   identical. Otherwise, the output retains its original value.
-
-c_element([New | More], _Old, New) :-
-    forall(member(N, More), N == New),
-    !.
-c_element(_List, Old, Old).
 
 %!  paxos_initialize(+Options) is det.
 %
@@ -173,8 +162,8 @@ c_element(_List, Old, Old).
 %     are used in bitmaps.
 
 paxos_initialize(Options) :-
-    option(node(Node), Options, Node),
-    node(Node).
+    paxos_assign_node(Options),
+    paxos_initialize.
 
 %!  paxos_initialize is det.
 %
@@ -196,9 +185,206 @@ paxos_initialize_sync :-
     !.
 paxos_initialize_sync :-
     listen(paxos, paxos(X), paxos_message(X)),
-    node(_Node),
+    paxos_assign_node([]),
+    start_replicator,
     asserta(paxos_initialized).
 
+
+		 /*******************************
+		 *            ADMIN		*
+		 *******************************/
+
+%!  paxos_get_admin(+Name, -Value) is semidet.
+%!  paxos_set_admin(+Name, +Value) is semidet.
+%
+%   Set administrative keys. We use a wrapper  such that we can hide the
+%   key identity.
+
+admin_key(quorum, '$paxos_quorum').
+admin_key(dead,  '$paxos_dead_nodes').
+
+paxos_get_admin(Name, Value) :-
+    admin_key(Name, Key),
+    paxos_get(Key, Value).
+
+paxos_set_admin(Name, Value) :-
+    admin_key(Name, Key),
+    paxos_set(Key, Value).
+
+
+		 /*******************************
+		 *           NODE DATA		*
+		 *******************************/
+
+%!  node(?NodeId).
+%!  quorum(?Bitmap).
+%!  dead(?Bitmap).
+%!  failed(?Bitmap).
+%!  failed(?NodeId, ?LastTried, ?Score).
+%
+%   Track our identity as well as as  the   status  of  our peers in the
+%   network. NodeId is a small integer. Multiple NodeIds are combined in
+%   a Bitmap.
+%
+%     - node/1 is our identity.
+%     - quorum/1 is the set of members of the quorum
+%     - failed/1 is the set of members for which the last message was
+%       not confirmed.
+%     - failed/3 tracks individual failed nodes. If accumulates failures
+%       until the node is marked _dead_.
+%     - dead/1 is the set of members that is considered dead.
+
+:- dynamic
+    node/1,                             % NodeID
+    quorum/1,                           % Bitmap
+    failed/1,                           % Bitmap
+    failed/3,                           % NodeID, LastTried, Score
+    dead/1.                             % Bitmap
+:- volatile
+    node/1,
+    quorum/1,
+    dead/1,
+    failed/1,
+    failed/3.
+
+%!  paxos_assign_node(+Options) is det.
+%
+%   Assign a node for this  paxos  instance.   If  node  is  given as an
+%   option, this is the node id that   is used. Otherwise the network is
+%   analyses and the system selects a new node.
+%
+%   @bug The current implementation does not   avoid that two nodes that
+%   are added at the same time get the same identifier.
+
+paxos_assign_node([]) :-
+    node(_),                            % already done
+    !.
+paxos_assign_node(Options) :-
+    option(node(Node), Options, Node),
+    (   node(_)
+    ->  permission_error(set, paxos_node, Node)
+    ;   true
+    ),
+    debug(paxos(node), 'Finding peers ...', []),
+    paxos_message(node(N,Q,D), 0.25, NodeQuery),
+    findall(t(N,Q,D),
+            broadcast_request(NodeQuery),
+            NodeStatus),
+    arg_union(2, NodeStatus, Quorum),
+    arg_union(3, NodeStatus, Dead),
+    (   var(Node)
+    ->  (   between(0, 1000, Node),
+            \+ memberchk(t(Node,_,_), NodeStatus),
+            Dead /\ (1<<Node) =:= 0
+        ->  debug(paxos(node), 'Assigning myself node ~d', [Node])
+        ;   resource_error(paxos_nodes)
+        )
+    ;   memberchk(t(Node,_,_), NodeStatus)
+    ->  permission_error(set, paxos_node, Node)
+    ;   Rejoin = true
+    ),
+    asserta(node(Node)),
+    asserta(dead(Dead)),
+    set_quorum(Node, Quorum),
+    (   Rejoin == true
+    ->  paxos_rejoin
+    ;   true
+    ).
+
+
+set_quorum(Node, Quorum0) :-
+    Quorum is Quorum0 \/ (1<<Node),
+    debug(paxos(node), 'Adding ~d to quorum (now 0x~16r)', [Node, Quorum]),
+    asserta(quorum(Quorum)),
+    paxos_set_admin(quorum, Quorum).
+
+
+%!  paxos_rejoin
+%
+%   Re-join the network.  Tasks:
+%
+%     - Remove myself from the dead list if I'm on there
+%     - Tell the replicators we lost everything.
+
+paxos_rejoin :-
+    node(Node),
+    repeat,
+        paxos_get_admin(dead, Dead0),
+        Dead is Dead0 /\ \(1<<Node),
+        (   Dead == Dead0
+        ->  true
+        ;   paxos_set_admin(dead, Dead)
+        ),
+    !.
+
+%!  paxos_leave
+%
+%   Leave the network.  Currently called from at_halt/1.
+
+:- at_halt(paxos_leave).
+
+paxos_leave :-
+    node(Node),
+    !,
+    paxos_update_set(quorum, del(Node)),
+    paxos_update_set(dead,   add(Node)),
+    Set is 1<<Node,
+    paxos_message(forget(Set), -, Forget),
+    broadcast(Forget).
+paxos_leave.
+
+paxos_update_set(Set, How) :-
+    repeat,
+      Term =.. [Set,Value],
+      call(Term),
+      (   How = add(Node)
+      ->  NewValue is Value \/  (1<<Node)
+      ;   How = del(Node)
+      ->  NewValue is Value /\ \(1<<Node)
+      ),
+      (   Value == NewValue
+      ->  true
+      ;   paxos_set_admin(Set, NewValue)
+      ),
+    !.
+
+		 /*******************************
+		 *        NETWORK STATUS	*
+		 *******************************/
+
+:- admin_key(quorum, Key),
+   listen(paxos_changed(Key, Quorum),
+          update_copy(quorum, Quorum)).
+:- admin_key(dead, Key),
+   listen(paxos_changed(Key, Death),
+          update_copy(death, Death)).
+
+update_copy(Name, Value) :-
+    Term =.. [Name,Value0],
+    clause(Term, true, Ref),
+    !,
+    (   Value0 == Value
+    ->  true
+    ;   debug(paxos(node), 'Updated ~w to 0x~16r', [Name, Value]),
+        NewTerm =.. [Name,Value],
+        updated(NewTerm, Value0),
+        asserta(NewTerm),
+        erase(Ref)
+    ).
+update_copy(Name, Value) :-
+    NewTerm =.. [Name,Value],
+    asserta(NewTerm).
+
+updated(quorum(Quorum), Quorum0) :-
+    Quorum /\ \Quorum0 =\= 0,
+    !,
+    start_replicator.
+updated(_, _).
+
+
+		 /*******************************
+		 *         INBOUND EVENTS	*
+		 *******************************/
 
 %!  paxos_message(?Message)
 %
@@ -272,8 +458,15 @@ paxos_message(retrieve(Key,Node,K,Value)) :-
     !.
 paxos_message(forget(Nodes)) :-
     ledger_forget(Nodes).
-paxos_message(node(Node)) :-
-    node(Node).
+paxos_message(node(Node,Quorum,Dead)) :-
+    node(Node),
+    quorum(Quorum),
+    dead(Dead).
+
+
+		 /*******************************
+		 *     KEY-VALUE OPERATIONS	*
+		 *******************************/
 
 %%  paxos_set(+Term) is semidet.
 %
@@ -341,7 +534,7 @@ paxos_set(Key, Value, Options) :-
       broadcast(paxos(log(Key,Value,AcceptNodes,K1))),
       paxos_message(changed(Key,K1,Value,AcceptNodes), -, Changed),
       broadcast(Changed),
-      update_failed(Quorum, AcceptNodes),
+      update_failed(set, Quorum, AcceptNodes),
     !.
 
 apply_default(Var, Setting) :-
@@ -451,7 +644,7 @@ paxos_get(Key, Value, Options) :-
       debug(paxos, 'Best: ~p with ~d votes', [MajorityValue, Count]),
       Count >= (popcount(QuorumA)+2)//2,
       debug(paxos, 'Retrieve: accept ~p', [MajorityValue]),
-      update_failed(Quorum, RetrievedNodes),
+      update_failed(get, Quorum, RetrievedNodes),
       paxos_set(Key, MajorityValue),    % Is this needed?
     !.
 
@@ -490,6 +683,73 @@ paxos_key(Compound, _) :-
 		 *          REPLICATION		*
 		 *******************************/
 
+%!  start_replicator
+%
+%   Start or signal the replicator thread  that there may be outstanding
+%   replication work.  This is the case if
+%
+%     - The union of _quorum_ and _learners_ was extended, and thus
+%       all data may need to be replicated to the new members.
+%     - A paxos_set/3 was not fully acknowledged.
+
+start_replicator :-
+    catch(thread_send_message(paxos_replicator, run),
+          error(existence_error(_,_),_),
+          fail),
+    !.
+start_replicator :-
+    catch(thread_create(replicator, _,
+                        [ alias(paxos_replicator),
+                          detached(true)
+                        ]),
+          error(permission_error(_,_,_),_),
+          true).
+
+replicator :-
+    setting(replication_rate, ReplRate),
+    ReplSleep is 1/ReplRate,
+    node(Node),
+    debug(paxos(replicate), 'Starting replicator', []),
+    State = state(idle),
+    repeat,
+      life_quorum(Quorum),
+      (   Quorum /\ \(1<<Node) =:= 0
+      ->  debug(paxos(replicate), 'I''m alone, waiting ...', []),
+          thread_get_message(_)
+      ;   (   paxos_replicate_key(Quorum, Key, [])
+          ->  replicated(State, key(Key)),
+              thread_self(Me),
+              thread_get_message(Me, _, [timeout(ReplSleep)])
+          ;   replicated(State, idle),
+              thread_get_message(_)
+          )
+      ),
+      fail.
+
+life_quorum(LifeQuorum) :-
+    quorum(Quorum),
+    dead(Dead),
+    LifeQuorum is Quorum /\ \Dead.
+
+replicated(State, key(_Key)) :-
+    arg(1, State, idle),
+    !,
+    debug(paxos(replicate), 'Start replicating ...', []),
+    nb_setarg(1, State, 1).
+replicated(State, key(_Key)) :-
+    !,
+    arg(1, State, C0),
+    C is C0+1,
+    nb_setarg(1, State, C).
+replicated(State, idle) :-
+    arg(1, State, idle),
+    !.
+replicated(State, idle) :-
+    arg(1, State, Count),
+    debug(paxos(replicate), 'Replicated ~D keys', [Count]),
+    nb_setarg(1, State, idle).
+
+
 %!  paxos_replicate_key(+Nodes:bitmap, ?Key, +Options) is det.
 %
 %   Replicate a Key to Nodes.  If Key is unbound, a random key is
@@ -509,7 +769,7 @@ paxos_replicate_key(Nodes, Key, Options) :-
     NewHolders is Holders \/ LearnedNodes,
     paxos_message(learned(Key,Gen,Value,NewHolders), -, Learned),
     broadcast(Learned),
-    update_failed(Nodes, LearnedNodes).
+    update_failed(replicate, Nodes, LearnedNodes).
 
 replication_key(_Nodes, Key) :-
     ground(Key),
@@ -530,25 +790,30 @@ needs_replicate(Nodes, Key) :-
 		 *          NODE STATUS		*
 		 *******************************/
 
-%!  update_failed(+Quorum, +Alive) is det.
+%!  update_failed(+Action, +Quorum, +Alive) is det.
 %
 %   We just sent the Quorum a  message  and   got  a  reply from the set
 %   Alive.
+%
+%   @arg is one of `set`, `get` or `replicate` and indicates the
+%   intended action.
 
-:- dynamic failed/1, failed/3.
-:- volatile failed/1, failed/3.
-
-update_failed(Quorum, Alive) :-
+update_failed(Action, Quorum, Alive) :-
     Failed is Quorum /\ \Alive,
     alive(Alive),
     consider_dead(Failed),
     (   failed(Failed)
     ->  true
-    ;   clause(failed(_Old), true, Ref)
-    ->  asserta(failed(Failed)),
-        erase(Ref),
-        debug(paxos(node), 'Updated failed quorum to 0x~16r', [Failed])
-    ;   asserta(failed(Failed))
+    ;   (   clause(failed(_Old), true, Ref)
+        ->  asserta(failed(Failed)),
+            erase(Ref),
+            debug(paxos(node), 'Updated failed quorum to 0x~16r', [Failed])
+        ;   asserta(failed(Failed))
+        ),
+        (   Action == set
+        ->  start_replicator
+        ;   true
+        )
     ).
 
 consider_dead(0) :-
@@ -785,3 +1050,36 @@ ledger_forget(Nodes, Key, Gen, Holders) :-
 
 valid(Holders) :-
     integer(Holders).
+
+
+		 /*******************************
+		 *             UTIL		*
+		 *******************************/
+
+%!  c_element(+NewList, +Old, -Value)
+%
+%   A Muller c-element is a logic block  used in asynchronous logic. Its
+%   output assumes the value of its  input   iff  all  of its inputs are
+%   identical. Otherwise, the output retains its original value.
+
+c_element([New | More], _Old, New) :-
+    forall(member(N, More), N == New),
+    !.
+c_element(_List, Old, Old).
+
+%!  arg_union(+Arg, +ListOfTerms, -Set) is det.
+%
+%   Get all the nth args from ListOfTerms  and   do  a  set union on the
+%   result.
+
+arg_union(Arg, NodeStatusList, Set) :-
+    maplist(arg(Arg), NodeStatusList, Sets),
+    list_union(Sets, Set).
+
+list_union(Sets, Set) :-
+    list_union(Sets, 0, Set).
+
+list_union([], Set, Set).
+list_union([H|T], Set0, Set) :-
+    Set1 is Set0 \/ H,
+    list_union(T, Set1, Set).
