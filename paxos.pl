@@ -349,6 +349,84 @@ paxos_update_set(Set, How) :-
     !.
 
 		 /*******************************
+		 *          NODE STATUS		*
+		 *******************************/
+
+%!  update_failed(+Action, +Quorum, +Alive) is det.
+%
+%   We just sent the Quorum a  message  and   got  a  reply from the set
+%   Alive.
+%
+%   @arg is one of `set`, `get` or `replicate` and indicates the
+%   intended action.
+
+update_failed(Action, Quorum, Alive) :-
+    Failed is Quorum /\ \Alive,
+    alive(Alive),
+    consider_dead(Failed),
+    (   failed(Failed)
+    ->  true
+    ;   (   clause(failed(_Old), true, Ref)
+        ->  asserta(failed(Failed)),
+            erase(Ref),
+            debug(paxos(node), 'Updated failed quorum to 0x~16r', [Failed])
+        ;   asserta(failed(Failed))
+        ),
+        (   Action == set
+        ->  start_replicator
+        ;   true
+        )
+    ).
+
+consider_dead(0) :-
+    !.
+consider_dead(Failed) :-
+    Node is lsb(Failed),
+    consider_dead1(Node),
+    Rest is Failed /\ \(1<<Node),
+    consider_dead(Rest).
+
+consider_dead1(Node) :-
+    clause(failed(Node, Last, Score), true, Ref),
+    !,
+    get_time(Now),
+    Passed is Now-Last,
+    NewScore is Score*(2**(-Passed/60)) + 10,
+    asserta(failed(Node, Now, NewScore)),
+    erase(Ref).
+consider_dead1(Node) :-
+    get_time(Now),
+    asserta(failed(Node, Now, 10)).
+
+alive(Bitmap) :-
+    (   clause(failed(Node, _Last, _Score), true, Ref),
+        Bitmap /\ (1<<Node) =\= 0,
+        erase(Ref),
+        fail
+    ;   true
+    ).
+
+
+%!  life_quorum(-Quorum, -LifeQuorum) is det.
+%
+%   Find the Quorum and the living nodes   from  the Quorum. This is the
+%   set for which we wait.  If  the   LifeQuorum  is  not  a majority we
+%   address the whole Quorum.
+%
+%   @tbd At some point in time we must remove a node from the quorum.
+
+life_quorum(Quorum, LifeQuorum) :-
+    quorum(Quorum),
+    (   failed(Failed),
+        Failed \== 0,
+        LifeQuorum is Quorum /\ \Failed,
+        majority(LifeQuorum, Quorum)
+    ->  true
+    ;   LifeQuorum = Quorum
+    ).
+
+
+		 /*******************************
 		 *        NETWORK STATUS	*
 		 *******************************/
 
@@ -784,84 +862,6 @@ replication_key(Nodes, Key) :-
 needs_replicate(Nodes, Key) :-
     ledger_current(Key, _Gen, _Value, Holders),
     Nodes /\ \Holders =\= 0.
-
-
-		 /*******************************
-		 *          NODE STATUS		*
-		 *******************************/
-
-%!  update_failed(+Action, +Quorum, +Alive) is det.
-%
-%   We just sent the Quorum a  message  and   got  a  reply from the set
-%   Alive.
-%
-%   @arg is one of `set`, `get` or `replicate` and indicates the
-%   intended action.
-
-update_failed(Action, Quorum, Alive) :-
-    Failed is Quorum /\ \Alive,
-    alive(Alive),
-    consider_dead(Failed),
-    (   failed(Failed)
-    ->  true
-    ;   (   clause(failed(_Old), true, Ref)
-        ->  asserta(failed(Failed)),
-            erase(Ref),
-            debug(paxos(node), 'Updated failed quorum to 0x~16r', [Failed])
-        ;   asserta(failed(Failed))
-        ),
-        (   Action == set
-        ->  start_replicator
-        ;   true
-        )
-    ).
-
-consider_dead(0) :-
-    !.
-consider_dead(Failed) :-
-    Node is lsb(Failed),
-    consider_dead1(Node),
-    Rest is Failed /\ \(1<<Node),
-    consider_dead(Rest).
-
-consider_dead1(Node) :-
-    clause(failed(Node, Last, Score), true, Ref),
-    !,
-    get_time(Now),
-    Passed is Now-Last,
-    NewScore is Score*(2**(-Passed/60)) + 10,
-    asserta(failed(Node, Now, NewScore)),
-    erase(Ref).
-consider_dead1(Node) :-
-    get_time(Now),
-    asserta(failed(Node, Now, 10)).
-
-alive(Bitmap) :-
-    (   clause(failed(Node, _Last, _Score), true, Ref),
-        Bitmap /\ (1<<Node) =\= 0,
-        erase(Ref),
-        fail
-    ;   true
-    ).
-
-
-%!  life_quorum(-Quorum, -LifeQuorum) is det.
-%
-%   Find the Quorum and the living nodes   from  the Quorum. This is the
-%   set for which we wait.  If  the   LifeQuorum  is  not  a majority we
-%   address the whole Quorum.
-%
-%   @tbd At some point in time we must remove a node from the quorum.
-
-life_quorum(Quorum, LifeQuorum) :-
-    quorum(Quorum),
-    (   failed(Failed),
-        Failed \== 0,
-        LifeQuorum is Quorum /\ \Failed,
-        majority(LifeQuorum, Quorum)
-    ->  true
-    ;   LifeQuorum = Quorum
-    ).
 
 
 		 /*******************************
