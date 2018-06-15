@@ -485,6 +485,11 @@ paxos_key(Compound, '$c'(Name,Arity)) :-
 paxos_key(Compound, _) :-
     must_be(compound, Compound).
 
+
+		 /*******************************
+		 *          REPLICATION		*
+		 *******************************/
+
 %!  paxos_replicate_key(+Nodes:bitmap, ?Key, +Options) is det.
 %
 %   Replicate a Key to Nodes.  If Key is unbound, a random key is
@@ -503,7 +508,8 @@ paxos_replicate_key(Nodes, Key, Options) :-
     collect(Nodes, Ga == nack, Na, Ga, Learn, _Gas, LearnedNodes),
     NewHolders is Holders \/ LearnedNodes,
     paxos_message(learned(Key,Gen,Value,NewHolders), -, Learned),
-    broadcast(Learned).
+    broadcast(Learned),
+    update_failed(Nodes, LearnedNodes).
 
 replication_key(_Nodes, Key) :-
     ground(Key),
@@ -518,6 +524,11 @@ replication_key(Nodes, Key) :-
 needs_replicate(Nodes, Key) :-
     ledger_current(Key, _Gen, _Value, Holders),
     Nodes /\ \Holders =\= 0.
+
+
+		 /*******************************
+		 *          NODE STATUS		*
+		 *******************************/
 
 %!  update_failed(+Quorum, +Alive) is det.
 %
@@ -587,6 +598,10 @@ life_quorum(Quorum, LifeQuorum) :-
     ;   LifeQuorum = Quorum
     ).
 
+
+		 /*******************************
+		 *      KEY CHANGE EVENTS	*
+		 *******************************/
 
 %!  paxos_on_change(?Term, :Goal) is det.
 %!  paxos_on_change(?Key, ?Value, :Goal) is det.
