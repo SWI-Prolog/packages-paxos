@@ -46,7 +46,7 @@
 :- use_module(library(unix)).
 :- use_module(library(process)).
 
-:- debug(nodes(_)).
+:- debug(nodes(connect)).
 
 /** <module> Test interacting processes
 
@@ -70,17 +70,16 @@ The nodes are connected to the controller using sockets.
     gate/1,                             % Host:Port
     pending/2.                          % Passwd, Id
 
-%!  node_create(+Address, ?Id, +Options)
+%!  node_create(+Launcher, ?Id, +Options)
 %
 %   Create a new node at address and connect it.
 
-node_create(_Address, Id, Options) :-
-    option(launcher(Launcher), Options, terminator),
-    launcher(Launcher, Prog, Args),
-    controller,
-    node_gate(_Port),
+node_create(Launcher, Id, Options) :-
     option(alias(Id), Options, Id),
     default_id(Id),
+    launcher(Launcher, Id, Prog, Args),
+    controller,
+    node_gate(_Port),
     PasswdNum is random(1<<63),
     number_string(PasswdNum, Passwd),
     format(atom(PasswdOption), '--password=~w', [Passwd]),
@@ -96,8 +95,9 @@ node_create(_Address, Id, Options) :-
                    ]),
     asserta(node_pid(Id, Pid)).
 
-launcher(terminator, path(terminator), ['-x', 'swipl']).
-launcher(background, path(swipl), []).
+launcher(background, _,  path(swipl), []).
+launcher(terminator, Id, path(terminator), ['--title', Title, '-x', 'swipl']) :-
+    format(string(Title), 'Node ~w', [Id]).
 
 default_id(Id) :-
     var(Id),
@@ -112,7 +112,6 @@ default_id(_).
 :- on_signal(chld, _, child_changed).
 
 child_changed(_Sig) :-
-    format('Child changed~n'),
     (   node_pid(Node, PID),
         catch(process_wait(PID, Status,
                            [ timeout(0)
@@ -121,7 +120,8 @@ child_changed(_Sig) :-
               (   print_message(warning, E),
                   fail
               )),
-        debug(nodes(connect), 'Process ~p for node ~p: stopped with ~p',
+        retractall(node_pid(Node, PID)),
+        debug(nodes(pid), 'Process ~p for node ~p: stopped with ~p',
               [PID, Node, Status]),
         fail
     ;   true
