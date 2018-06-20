@@ -131,11 +131,34 @@ child_changed(_Sig) :-
 		 *          CONTROLLER		*
 		 *******************************/
 
+%!  run_on(+Nodes:list, +Goal) is nondet.
 %!  run_on(+Node, +Goal) is semidet.
 %
 %   Run once(Goal) on  Node.  The  binding,   failure  or  exception  is
-%   propagated to the caller.
+%   propagated to the caller. If  the  first   argument  is  a list, the
+%   message is sent to each member of the  list and the replies from the
+%   nodes is enumerated on backtracking.
 
+run_on(Nodes, Goal) :-
+    is_list(Nodes),
+    !,
+    length(Nodes, NodeCount),
+    term_variables(Goal, Vars),
+    Template =.. [v|Vars],
+    call_id(Id),
+    message_queue_create(Q),
+    State = nodes(NodeCount),
+    setup_call_cleanup(
+        asserta(queue(Id, Nodes, Q), Ref),
+        ( forall(( member(Node, Nodes),
+                   node(Node, Stream)
+                 ),
+                 ( fast_write(Stream, call(Id, Goal, Template)),
+                   flush_output(Stream)
+                 )),
+          collect_replies(State, Nodes, Q, Goal, Template)
+        ),
+        erase(Ref)).
 run_on(Node, Goal) :-
     term_variables(Goal, Vars),
     Template =.. [v|Vars],
@@ -165,6 +188,8 @@ call_id_sync(Id) :-
 call_id_sync(1) :-
     asserta(current_query_id(1)).
 
+%!  query_reply(+Reply, +Node, +Goal, +Template)
+
 query_reply(true(Template), _, _, Template).
 query_reply(error(E), _, _, _) :-
     throw(E).
@@ -174,6 +199,18 @@ query_reply(end_of_file, _, halt, _) :-
     !.
 query_reply(end_of_file, Node, _, _) :-
     throw(error(node_error(Node, halted), _)).
+
+collect_replies(State, Nodes, Queue, Goal, Template) :-
+    repeat,
+      thread_get_message(Queue, Reply),
+      arg(1, State, Left),
+      Left1 is Left - 1,
+      nb_setarg(1, State, Left1),
+      (   Left1 == 0
+      ->  !
+      ;   true
+      ),
+      query_reply(Reply, Nodes, Goal, Template).
 
 
 		 /*******************************
