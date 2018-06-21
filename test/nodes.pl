@@ -318,9 +318,9 @@ execute(call(Id, Call, Template), Stream) :-
 
 user:message_hook(Term, Kind, Lines) :-
     Kind \== silent,
-    client(Node, Stream),
+    client(_Node, Stream),
     !,
-    fast_write(Stream, message(Node, Term, Kind, Lines)),
+    fast_write(Stream, message(Term, Kind, Lines)),
     flush_output(Stream).
 
 
@@ -363,7 +363,8 @@ dispatch_available(Set0, Set, Stream) :-
     fast_read(Stream, Term),
     (   dispatch_term(Term, Node, Set0, Set)
     ->  true
-    ;   print_message(warning, dispatch_failed(Node, Term))
+    ;   print_message(warning, dispatch_failed(Node, Term)),
+        Set = Set0
     ).
 dispatch_available(Set0, Set, Stream) :-
     self_channel(Stream),
