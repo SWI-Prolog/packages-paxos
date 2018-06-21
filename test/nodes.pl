@@ -65,14 +65,22 @@ The nodes are connected to the controller using sockets.
     self_channel/1,                     % Pipe
     node/2,                             % NodeID, Stream
     node_pid/2,                         % NodeID, PID
-    client/2,                           %
+    client/2,                           % NodeID, Stream
     queue/3,                            % Id, Node, Queue
     gate/1,                             % Host:Port
-    pending/2.                          % Passwd, Id
+    pending/3,                          % Passwd, Id, Options
+    proxy_message_kind/1.
 
 %!  node_create(+Launcher, ?Id, +Options)
 %
-%   Create a new node at address and connect it.
+%   Create a new node at address and connect it.   Options
+%
+%     - alias(Name:atom)
+%     Name of the node.
+%     - proxy_messages(+Kinds)
+%     Kinds is either a list of message kinds (see print_message/2)
+%     or one of the constants `none` or `all`.  Default is not to
+%     proxy any messages.
 
 node_create(Launcher, Id, Options) :-
     option(alias(Id), Options, Id),
@@ -84,7 +92,7 @@ node_create(Launcher, Id, Options) :-
     number_string(PasswdNum, Passwd),
     format(atom(PasswdOption), '--password=~w', [Passwd]),
     connect_option(ConnectOption),
-    asserta(pending(Passwd, Id)),
+    asserta(pending(Passwd, Id, Options)),
     append(Args,
            [ '-g', 'run_node', file('nodes.pl'),
              ConnectOption,
@@ -102,7 +110,7 @@ launcher(terminator, Id, path(terminator), ['--title', Title, '-x', 'swipl']) :-
 default_id(Id) :-
     var(Id),
     !,
-    gensym(node_, Id).
+    gensym(n, Id).
 default_id(Id) :-
     node(Id, _),
     !,
@@ -245,20 +253,20 @@ gate_keeper(S) :-
 accept_node(Pair, Peer) :-
     fast_read(Pair, node(Passwd)),
     debug(nodes(connect), 'Got passwd = ~p', [Passwd]),
-    passwd_pass(Passwd, Peer, Id),
+    passwd_pass(Passwd, Peer, Id, Options),
     asserta(node(Id, Pair)),
     self_channel(Self),
     debug(nodes(connect), 'Informing self', []),
     fast_write(Self, join(Id)),
     flush_output(Self),
     debug(nodes(connect), 'Confirming ~p to client', [Id]),
-    fast_write(Pair, id(Id)),
+    fast_write(Pair, id(Id, Options)),
     flush_output(Pair).
 
-passwd_pass(Passwd, _, Id) :-
-    retract(pending(Passwd, Id)),
+passwd_pass(Passwd, _, Id, Options) :-
+    retract(pending(Passwd, Id, Options)),
     !.
-passwd_pass(_, Peer, _) :-
+passwd_pass(_, Peer, _, _) :-
     permission_error(connect, node, Peer).
 
 connect_option(Connect) :-
@@ -288,15 +296,20 @@ node(Options) :-
     tcp_connect(Host:Port, Stream, []),
     fast_write(Stream, node(Password)),
     flush_output(Stream),
-    fast_read(Stream, id(Id)),
-    run_node(Id, Stream).
+    fast_read(Stream, id(Id, NodeOptions)),
+    run_node(Id, Stream, NodeOptions).
 
-%!  run_node(+Id, +Stream)
+%!  run_node(+Id, +Stream, +Options)
 %
-%   Control a node
+%   Control a node.
+%
+%   @arg Options is passed down  from   node_create/3  that created this
+%   node.  See node_create/3 for the processed options.
 
-run_node(Id, Stream) :-
+run_node(Id, Stream, Options) :-
+    option(proxy_messages(Proxy), Options, []),
     asserta(client(Id, Stream)),
+    init_message_proxy(Proxy),
     node_loop(Stream).
 
 node_loop(Stream) :-
@@ -316,12 +329,33 @@ execute(call(Id, Call, Template), Stream) :-
     fast_write(Stream, reply(Id, Reply)),
     flush_output(Stream).
 
-user:message_hook(Term, Kind, Lines) :-
+init_message_proxy(none) :-
+    !.
+init_message_proxy([]) :-
+    !.
+init_message_proxy(List) :-
+    is_list(List),
+    !,
+    forall(member(Kind, List),
+           assertz(proxy_message_kind(Kind))),
+    link_messages.
+init_message_proxy(all) :-
+    assertz(proxy_message_kind(_)),
+    link_messages.
+
+link_messages :-
+    asserta(user:message_hook(Term, Kind, Lines) :-
+               message_proxy_hook(Term, Kind, Lines)).
+
+message_proxy_hook(Term, Kind, Lines) :-
     Kind \== silent,
     client(_Node, Stream),
+    proxy_message_kind(Kind),
     !,
     fast_write(Stream, message(Term, Kind, Lines)),
     flush_output(Stream).
+
+
 
 
 		 /*******************************
@@ -383,8 +417,28 @@ dispatch_term(reply(Magic,Term), _Node, Set, Set) :-
 dispatch_term(message(Term, Kind, Lines), Node, Set, Set) :-
     proxy_message(Node, Term, Kind, Lines).
 
-proxy_message(_Node, _Term, Kind, Lines) :-
-    print_message_lines(user_error, kind(Kind), Lines).
+%!  proxy_message(+Node, +Term, +Kind, +Lines)
+%
+%   Handle a message sent to us from  a node. Forwarding messages allows
+%   us to examine the flow of events in the nodes as one stream.
+
+proxy_message(Node, _Term, Kind, Lines) :-
+    current_prolog_flag(message_context, Ctx0),
+    setup_call_cleanup(
+        ( nb_setval(message_node, Node),
+          set_prolog_flag(message_context, [node,time])
+        ),
+        print_message_lines(user_error, kind(Kind), Lines),
+        ( set_prolog_flag(message_context, Ctx0),
+          nb_delete(message_node)
+        )).
+
+:- multifile
+    prolog:message_prefix_hook/2.
+
+prolog:message_prefix_hook(node, Prefix) :-
+    nb_current(message_node, Node),
+    format(string(Prefix), '[node ~w]', [Node]).
 
 dispatch_admin(join(Id), Set, [Stream|Set]) :-
     node(Id, Stream).
