@@ -68,7 +68,7 @@ The nodes are connected to the controller using sockets.
     client/2,                           % NodeID, Stream
     queue/3,                            % Id, Node, Queue
     gate/1,                             % Host:Port
-    pending/3,                          % Passwd, Id, Options
+    pending/4,                          % Passwd, Id, Queue, Options
     proxy_message_kind/1.
 
 %!  node_create(+Launcher, ?Id, +Options)
@@ -81,6 +81,9 @@ The nodes are connected to the controller using sockets.
 %     Kinds is either a list of message kinds (see print_message/2)
 %     or one of the constants `none` or `all`.  Default is not to
 %     proxy any messages.
+%     - async(Bool)
+%     If `true` (default `false`), do not wait for the node to become
+%     online.
 
 node_create(Launcher, Id, Options) :-
     option(alias(Id), Options, Id),
@@ -92,16 +95,28 @@ node_create(Launcher, Id, Options) :-
     number_string(PasswdNum, Passwd),
     format(atom(PasswdOption), '--password=~w', [Passwd]),
     connect_option(ConnectOption),
-    asserta(pending(Passwd, Id, Options)),
     append(Args,
            [ '-g', 'run_node', file('nodes.pl'),
              ConnectOption,
              PasswdOption
            ], ProgArgs),
+    (   option(async(true), Options, false)
+    ->  Q = []
+    ;   message_queue_create(Q)
+    ),
+    asserta(pending(Passwd, Id, Q, Options)),
     process_create(Prog, ProgArgs,
                    [ process(Pid)
                    ]),
-    asserta(node_pid(Id, Pid)).
+    asserta(node_pid(Id, Pid)),
+    (   Q == []
+    ->  true
+    ;   thread_get_message(Q, Started),
+        (   Started == true
+        ->  true
+        ;   throw(Started)
+        )
+    ).
 
 launcher(background, _,  path(swipl), []).
 launcher(terminator, Id, path(terminator), ['--title', Title, '-x', 'swipl']) :-
@@ -128,6 +143,7 @@ child_changed(_Sig) :-
               (   print_message(warning, E),
                   fail
               )),
+        Status \== timeout,
         retractall(node_pid(Node, PID)),
         debug(nodes(pid), 'Process ~p for node ~p: stopped with ~p',
               [PID, Node, Status]),
@@ -253,7 +269,7 @@ gate_keeper(S) :-
 accept_node(Pair, Peer) :-
     fast_read(Pair, node(Passwd)),
     debug(nodes(connect), 'Got passwd = ~p', [Passwd]),
-    passwd_pass(Passwd, Peer, Id, Options),
+    passwd_pass(Passwd, Peer, Id, Queue, Options),
     asserta(node(Id, Pair)),
     self_channel(Self),
     debug(nodes(connect), 'Informing self', []),
@@ -261,12 +277,21 @@ accept_node(Pair, Peer) :-
     flush_output(Self),
     debug(nodes(connect), 'Confirming ~p to client', [Id]),
     fast_write(Pair, id(Id, Options)),
-    flush_output(Pair).
+    flush_output(Pair),
+    (   Queue == []
+    ->  true
+    ;   thread_send_message(Queue, true)
+    ).
 
-passwd_pass(Passwd, _, Id, Options) :-
-    retract(pending(Passwd, Id, Options)),
+passwd_pass(Passwd, _, Id, Queue, Options) :-
+    retract(pending(Passwd, Id, Queue, Options)),
     !.
-passwd_pass(_, Peer, _, _) :-
+passwd_pass(_, Peer, _, Queue, _) :-
+    (   Queue == []
+    ->  true
+    ;   thread_send_message(Queue,
+                            error(permission_error(connect, node, Peer),_))
+    ),
     permission_error(connect, node, Peer).
 
 connect_option(Connect) :-
@@ -319,7 +344,7 @@ node_loop(Stream) :-
     node_loop(Stream).
 
 execute(call(Id, Call, Template), Stream) :-
-    (   catch(Call, E, true)
+    (   catch(user:Call, E, true)
     ->  (   var(E)
         ->  Reply = true(Template)
         ;   Reply = error(E)
