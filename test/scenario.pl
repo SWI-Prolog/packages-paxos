@@ -36,25 +36,26 @@
           [ play/2,                             % +Scenario, +Options
 
             op(800, xfx, <-),
-            op(990, xfx, &&)
+            op(990, xfy, &&)
           ]).
 :- use_module(library(option)).
 :- use_module(library(apply)).
+:- use_module(library(error)).
+:- use_module(library(debug)).
 :- use_module(nodes).
 
 /** <module> Describe and run concurrent test scnearios
 
-The description consists of two parts:
-
-  - What should happen
-  - What should hold
+Describe and run a concurrent scenario.
 */
 
 scenario(1,
-         [ start_node(a),
-           start_node(b),
-           on(b, k := 1),
-           on(a, K <- k) && K == 1
+         [ start_node(a) && start_node(b),
+           on(b, k := 1) && on(a, K <- k) && K == 1
+         ]).
+scenario(2,
+         [ start_node(a) && start_node(b),
+           on(b, k := 1) && on(a, ledger(k,_,K,_)) && K == 1
          ]).
 
 %!  play(+Steps, +Options)
@@ -85,16 +86,26 @@ play([H|T], State0, State, Tick0, Tick, Options) :-
     delay(Options),
     play(T, State1, State, Tick1, Tick, Options).
 
+step(Var, _, _, _, _) :-
+    var(Var),
+    !,
+    instantiation_error(Var).
+step(A&&B, State0, State, Tick, Options) :-
+    !,
+    (   step(A, State0, State1, Tick, Options)
+    ->  step(B, State1, State, Tick,  Options)
+    ;   update_state(failed(A), State0, State, Tick)
+    ).
+step(Goal, _, _, Tick, _) :-
+    debug(scenario(step), '[Step ~D] ~p ...', [Tick, Goal]),
+    fail.
 step(start_node(Id), State0, State, Tick, Options) :-
     option(launcher(Launcher), Options, background),
     node_create(Launcher, Id, Options),
-    run_on(Id, (load_files(paxos_node),start_node([]))),
+    call_on(Id, (load_files(paxos_node),start_node([]))),
     update_state(add_node(Id), State0, State, Tick).
 step(on(Node, Action), State, State, _Tick, _Options) :-
-    run_on(Node, Action).
-step(A&&B, State0, State, Tick, Options) :-
-    step(A, State0, State1, Tick, Options),
-    step(B, State1, State, Tick,  Options).
+    call_on(Node, Action).
 step(X==Y, State, State, _Tick, _Options) :-
     X==Y.
 
@@ -121,7 +132,7 @@ close_nodes(State0, State, _Options) :-
 close_nodes(State, State, _).
 
 close_node(Node) :-
-    run_on(Node, halt).
+    call_on(Node, halt).
 
 %!  played(+State, +Tick) is det.
 %

@@ -34,8 +34,9 @@
 
 :- module(paxos_node,
           [ start_node/1,                       % +Options
-            (:=)/2,
-            (<-)/2
+            (:=)/2,                             % +Key, +Value
+            (<-)/2,                             % -Value, +Key
+            ledger/4                            % ?Key, ?Gen, ?Value, ?Holders
           ]).
 :- use_module(library(udp_broadcast)).
 :- use_module(library(paxos)).
@@ -52,6 +53,10 @@ start_node(Options) :-
                              ]),
     paxos_initialize(Options).
 
+		 /*******************************
+		 *      PAXOS INTERACTION	*
+		 *******************************/
+
 :- op(800, xfx, <-).
 
 K := V :-
@@ -59,6 +64,13 @@ K := V :-
 
 V <- K :-
     paxos_get(K, V).
+
+%!  ledger(?Key, ?Gen, ?Value, ?Holders)
+%
+%   Query the memory of the node, bypassing paxos_get/2.
+
+ledger(Key, Gen, Value, Holders) :-
+    paxos:paxons_ledger(Key, Gen, Value, Holders).
 
 
 		 /*******************************

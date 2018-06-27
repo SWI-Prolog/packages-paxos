@@ -35,7 +35,8 @@
 
 :- module(test_nodes,
           [ node_create/3,              % +Address, ?Id, +Options
-            run_on/2,                   % +Node, ?Goal
+            call_on/2,                  % +Node, ?Goal
+            run_on/2,                   % +Node, +Goal
 
             run_node/0                  % Run a client node
           ]).
@@ -155,15 +156,34 @@ child_changed(_Sig) :-
 		 *          CONTROLLER		*
 		 *******************************/
 
-%!  run_on(+Nodes:list, +Goal) is nondet.
-%!  run_on(+Node, +Goal) is semidet.
+%!  run_on(+Node, +Goal) is det.
+%
+%   Run Goal on node without waiting   for  completion. Use call_on/2 to
+%   run Goal synchronously.
+
+run_on(Nodes, Goal) :-
+    is_list(Nodes),
+    !,
+    forall(member(Node, Nodes),
+           run_on_(Node, Goal)).
+run_on(Node, Goal) :-
+    run_on_(Node, Goal).
+
+run_on_(Node, Goal) :-
+    node(Node, Stream),
+    fast_write(Stream, call(Goal)),
+    flush_output(Stream).
+
+
+%!  call_on(+Nodes:list, +Goal) is nondet.
+%!  call_on(+Node, +Goal) is semidet.
 %
 %   Run once(Goal) on  Node.  The  binding,   failure  or  exception  is
 %   propagated to the caller. If  the  first   argument  is  a list, the
 %   message is sent to each member of the  list and the replies from the
 %   nodes is enumerated on backtracking.
 
-run_on(Nodes, Goal) :-
+call_on(Nodes, Goal) :-
     is_list(Nodes),
     !,
     length(Nodes, NodeCount),
@@ -183,7 +203,7 @@ run_on(Nodes, Goal) :-
           collect_replies(State, Nodes, Q, Goal, Template)
         ),
         erase(Ref)).
-run_on(Node, Goal) :-
+call_on(Node, Goal) :-
     term_variables(Goal, Vars),
     Template =.. [v|Vars],
     node(Node, Stream),
