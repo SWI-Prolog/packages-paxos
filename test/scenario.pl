@@ -87,6 +87,7 @@ play([H|T], State0, State, Tick0, Tick, Options) :-
 step(start_node(Id), State0, State, Tick, Options) :-
     option(launcher(Launcher), Options, background),
     node_create(Launcher, Id, Options),
+    run_on(Id, (load_files(paxos_node),start_node([]))),
     update_state(add_node(Id), State0, State, Tick).
 step(on(Node, Action), State, State, _Tick, _Options) :-
     run_on(Node, Action).
