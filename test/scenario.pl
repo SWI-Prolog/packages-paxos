@@ -39,6 +39,7 @@
             op(990, xfx, &&)
           ]).
 :- use_module(library(option)).
+:- use_module(library(apply)).
 :- use_module(nodes).
 
 /** <module> Describe and run concurrent test scnearios
@@ -67,11 +68,11 @@ play(Steps, Options) :-
     is_list(Steps),
     !,
     play(Steps, _{}, State, 0, Tick, Options),
-    writeln(State-Tick).
+    played(State, Tick).
 play(Scenario, Options) :-
     scenario(Scenario, Steps),
     play(Steps, _{}, State, 0, Tick, Options),
-    writeln(State-Tick).
+    played(State, Tick).
 
 play([], State0, State, Tick, Tick, Options) :-
     close_nodes(State0, State, Options).
@@ -121,3 +122,27 @@ close_nodes(State, State, _).
 
 close_node(Node) :-
     run_on(Node, halt).
+
+%!  played(+State, +Tick) is det.
+%
+%   We finished playing the scenario with final state State at Tick
+
+played(State, _) :-
+    Failures = State.get(failures),
+    Failures \== [],
+    !,
+    print_message(error, scenario(failed(Failures))),
+    fail.
+played(_, _).
+
+		 /*******************************
+		 *            MESSAGES		*
+		 *******************************/
+
+:- multifile prolog:message//1.
+
+prolog:message(scenario(Msg)) -->
+    message(Msg).
+
+message(failed(Failures)) -->
+    [ 'Scenario failed: ~p'-[Failures] ].

@@ -46,7 +46,7 @@
 :- use_module(library(unix)).
 :- use_module(library(process)).
 
-:- debug(nodes(connect)).
+% :- debug(nodes(connect)).
 
 /** <module> Test interacting processes
 
