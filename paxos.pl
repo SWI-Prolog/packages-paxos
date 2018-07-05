@@ -53,6 +53,7 @@
 :- use_module(library(settings)).
 :- use_module(library(option)).
 :- use_module(library(error)).
+:- use_module(library(apply)).
 :- use_module(library(solution_sequences)).
 
 /** <module> A Replicated Data Store
@@ -165,33 +166,26 @@ identical for all attentive members of the quorum.|_
 %     NodeID must be a small non-negative integer as these identifiers
 %     are used in bitmaps.
 
-paxos_initialize(Options) :-
-    paxos_assign_node(Options),
-    paxos_initialize.
-
-%!  paxos_initialize is det.
-%
-%   causes any required runtime initialization to occur. It is called as
-%   a side-effect of initialize/0, which is now required as part of
-%   an applications initialization directive.
-
 :- dynamic  paxos_initialized/0.
 :- volatile paxos_initialized/0.
 
-paxos_initialize :-
+paxos_initialize(_Options) :-
     paxos_initialized,
     !.
-paxos_initialize :-
-    with_mutex(paxos, paxos_initialize_sync).
+paxos_initialize(Options) :-
+    with_mutex(paxos, paxos_initialize_sync(Options)).
 
-paxos_initialize_sync :-
+paxos_initialize_sync(_Options) :-
     paxos_initialized,
     !.
-paxos_initialize_sync :-
+paxos_initialize_sync(Options) :-
     listen(paxos, paxos(X), paxos_message(X)),
-    paxos_assign_node([]),
+    paxos_assign_node(Options),
     start_replicator,
     asserta(paxos_initialized).
+
+paxos_initialize :-
+    paxos_initialize([]).
 
 
 		 /*******************************
@@ -214,6 +208,11 @@ paxos_get_admin(Name, Value) :-
 paxos_set_admin(Name, Value) :-
     admin_key(Name, Key),
     paxos_set(Key, Value).
+
+paxos_set_admin_bg(Name, Value) :-
+    thread_create(ignore(paxos_set_admin(Name, Value)), _,
+                  [ detached(true)
+                  ]).
 
 
 		 /*******************************
@@ -243,58 +242,97 @@ paxos_set_admin(Name, Value) :-
     quorum/1,                           % Bitmap
     failed/1,                           % Bitmap
     failed/3,                           % NodeID, LastTried, Score
-    dead/1.                             % Bitmap
+    leaving/0,                          % Node is leaving
+    dead/1,                             % Bitmap
+    salt/1.                             % Unique key
 :- volatile
     node/1,
     quorum/1,
-    dead/1,
     failed/1,
-    failed/3.
+    failed/3,
+    leaving/0,
+    dead/1,
+    salt/1.
 
 %!  paxos_assign_node(+Options) is det.
 %
 %   Assign a node for this  paxos  instance.   If  node  is  given as an
 %   option, this is the node id that   is used. Otherwise the network is
-%   analyses and the system selects a new node.
-%
-%   @bug The current implementation does not   avoid that two nodes that
-%   are added at the same time get the same identifier.
+%   analysed and the system selects a new node.
 
-paxos_assign_node([]) :-
-    node(_),                            % already done
+paxos_assign_node(Options) :-
+    (   option(node(Node), Options)
+    ->  node(Node)
+    ;   node(_)
+    ),                                          % already done
     !.
 paxos_assign_node(Options) :-
+    between(1, 20, Retry),
     option(node(Node), Options, Node),
     (   node(_)
     ->  permission_error(set, paxos_node, Node)
     ;   true
     ),
-    debug(paxos(node), 'Finding peers ...', []),
-    paxos_message(node(N,Q,D), 0.25, NodeQuery),
-    findall(t(N,Q,D),
+    retractall(dead(_)),
+    retractall(quorum(_)),
+    retractall(failed(_)),
+    retractall(failed(_,_,_)),
+    retractall(leaving),
+    Salt is random(1<<63),
+    asserta(salt(Salt)),
+    paxos_message(node(N,Q,D):From, 0.25, NodeQuery),
+    findall(t(N,Q,D,From),
             broadcast_request(NodeQuery),
-            NodeStatus),
-    arg_union(2, NodeStatus, Quorum),
-    arg_union(3, NodeStatus, Dead),
+            Network),
+    select(t(self,0,Salt,Me), Network, AllNodeStatus),
+    partition(starting, AllNodeStatus, Starting, Running),
+    nth_starting(Starting, Salt, Offset),
+    retractall(salt(_)),
+    debug(paxos(node), 'Me@~p; starting: ~p; running: ~p',
+          [Me, Starting, Running]),
+    arg_union(2, Running, Quorum),
+    arg_union(3, Running, Dead),
     (   var(Node)
-    ->  (   between(0, 1000, Node),
-            \+ memberchk(t(Node,_,_), NodeStatus),
-            Dead /\ (1<<Node) =:= 0
+    ->  (   call_nth(( between(0, 1000, Node),
+                       \+ memberchk(t(Node,_,_,_), Running),
+                       Dead /\ (1<<Node) =:= 0),
+                     Offset)
         ->  debug(paxos(node), 'Assigning myself node ~d', [Node])
         ;   resource_error(paxos_nodes)
         )
-    ;   memberchk(t(Node,_,_), NodeStatus)
+    ;   memberchk(t(Node,_,_,_), Running)
     ->  permission_error(set, paxos_node, Node)
     ;   Rejoin = true
     ),
     asserta(node(Node)),
-    asserta(dead(Dead)),
-    set_quorum(Node, Quorum),
-    (   Rejoin == true
-    ->  paxos_rejoin
-    ;   true
+    (   claim_node(Node, Me)
+    ->  !,
+        asserta(dead(Dead)),
+        set_quorum(Node, Quorum),
+        (   Rejoin == true
+        ->  paxos_rejoin
+        ;   true
+        )
+    ;   debug(paxos(node), 'Node already claimed; retrying (~p)', [Node, Retry]),
+        retractall(node(Node)),
+        fail
     ).
 
+starting(t(self,_Quorum,_Salt,_Address)).
+
+nth_starting(Starting, Salt, N) :-
+    maplist(arg(3), Starting, Salts),
+    sort([Salt|Salts], Sorted),
+    nth1(N, Sorted, Salt),
+    !.
+
+claim_node(Node, Me) :-
+    paxos_message(claim_node(Node, Ok):From, 0.25, NodeQuery),
+    forall((   broadcast_request(NodeQuery),
+               From \== Me,
+               debug(paxos(node), 'Claim ~p ~p: ~p', [Node, From, Ok])
+           ),
+           Ok == true).
 
 set_quorum(Node, Quorum0) :-
     Quorum is Quorum0 \/ (1<<Node),
@@ -333,10 +371,13 @@ paxos_rejoin :-
 
 paxos_leave :-
     node(Node),
+    asserta(leaving),
     paxos_leave(Node),
     Set is 1<<Node,
     paxos_message(forget(Set), -, Forget),
-    broadcast(Forget).
+    broadcast(Forget),
+    unlisten(paxos),
+    retractall(leaving).
 
 paxos_leave(Node) :-
     !,
@@ -450,33 +491,58 @@ life_quorum(Quorum, LifeQuorum) :-
 
 :- admin_key(quorum, Key),
    listen(paxos_changed(Key, Quorum),
-          update_copy(quorum, Quorum)).
+          update_quorum(Quorum)).
 :- admin_key(dead, Key),
    listen(paxos_changed(Key, Death),
-          update_copy(death, Death)).
+          update_dead(Death)).
 
-update_copy(Name, Value) :-
-    Term =.. [Name,Value0],
-    clause(Term, true, Ref),
+update_quorum(Proposed) :-
+    debug(paxos(node), 'Received quorum proposal 0x~16r', [Proposed]),
+    quorum(Proposed),
+    !.
+update_quorum(Proposed) :-
+    leaving,
     !,
-    (   Value0 == Value
-    ->  true
-    ;   debug(paxos(node), 'Updated ~w to 0x~16r', [Name, Value]),
-        NewTerm =.. [Name,Value],
-        updated(NewTerm, Value0),
-        asserta(NewTerm),
+    update(quorum(Proposed)).
+update_quorum(Proposed) :-
+    node(Node),
+    Proposed /\ (1<<Node) =\= 0,
+    !,
+    update(quorum(Proposed)).
+update_quorum(Proposed) :-
+    node(Node),
+    NewQuorum is Proposed \/ (1<<Node),
+    update(quorum(NewQuorum)),
+    debug(paxos(node), 'I''m not in the quorum! Proposing 0x~16r', [NewQuorum]),
+    paxos_set_admin_bg(quorum, NewQuorum).
+
+update_dead(Proposed) :-
+    debug(paxos(node), 'Received dead proposal 0x~16r', [Proposed]),
+    dead(Proposed),
+    !.
+update_dead(Proposed) :-
+    leaving,
+    !,
+    update(dead(Proposed)).
+update_dead(Proposed) :-
+    node(Node),
+    Proposed /\ (1<<Node) =:= 0,
+    !,
+    update(dead(Proposed)).
+update_dead(Proposed) :-
+    node(Node),
+    NewDead is Proposed /\ \(1<<Node),
+    update(dead(NewDead)),
+    paxos_set_admin_bg(dead, NewDead).
+
+update(Clause) :-
+    functor(Clause, Name, Arity),
+    functor(Generic, Name, Arity),
+    (   clause(Generic, true, Ref)
+    ->  asserta(Clause),
         erase(Ref)
+    ;   asserta(Clause)
     ).
-update_copy(Name, Value) :-
-    NewTerm =.. [Name,Value],
-    asserta(NewTerm).
-
-updated(quorum(Quorum), Quorum0) :-
-    Quorum /\ \Quorum0 =\= 0,
-    !,
-    start_replicator.
-updated(_, _).
-
 
 		 /*******************************
 		 *         INBOUND EVENTS	*
@@ -508,8 +574,10 @@ updated(_, _).
 %     our node id and the generation.
 %     - forget(+Nodes)
 %     Forget the existence of Nodes.
-%     - node(-Node)
-%     Get the node id.
+%     - node(-Node,-Quorum,-Dead)
+%     Get my view about the network.  Node is the (integer) node id of
+%     this node, Quorum is the idea of the quorum and Dead is the idea
+%     about non-responsive nodes.
 %
 %   @tbd: originally the changed was  handled  by   a  get  and when not
 %   successful with a new set, named   _paxos_audit_. I don't really see
@@ -525,14 +593,14 @@ paxos_message(prepare(Key,Node,Gen,Value)) :-
     debug(paxos, 'Prepared ~p-~p@~d', [Key,Value,Gen]).
 paxos_message(accept(Key,Node,Gen,GenA,Value)) :-
     node(Node),
-    debug(paxos, 'Accept ~p-~p@~p?', [Key, Value, Gen]),
     (   ledger_update(Key, Gen, Value)
     ->  debug(paxos, 'Accepted ~p-~p@~d', [Key,Value,Gen]),
         GenA = Gen
-    ;   debug(paxos, 'Rejected ~p@~d', [Key, Gen]),
+    ;   debug(paxos, 'Rejected ~p-~p@~d', [Key,Value,Gen]),
         GenA = nack
     ).
 paxos_message(changed(Key,Gen,Value,Acceptors)) :-
+    debug(paxos, 'Changed ~p-~p@~d for ~p', [Key, Value, Gen, Acceptors]),
     ledger_update_holders(Key,Gen,Acceptors),
     broadcast(paxos_changed(Key,Value)).
 paxos_message(learn(Key,Node,Gen,GenA,Value)) :-
@@ -555,9 +623,20 @@ paxos_message(retrieve(Key,Node,K,Value)) :-
 paxos_message(forget(Nodes)) :-
     ledger_forget(Nodes).
 paxos_message(node(Node,Quorum,Dead)) :-
-    node(Node),
-    quorum(Quorum),
-    dead(Dead).
+    (   node(Node),
+        quorum(Quorum),
+        dead(Dead)
+    ->  true
+    ;   salt(Salt),
+        Node = self,
+        Quorum = 0,
+        Dead = Salt
+    ).
+paxos_message(claim_node(Node, Ok)) :-
+    (   node(Node)
+    ->  Ok = false
+    ;   Ok = true
+    ).
 
 
 		 /*******************************
@@ -617,9 +696,11 @@ paxos_set(Key, Value, Options) :-
     paxos_message(prepare(Key,Np,Rp,Value), TMO, Prepare),
     between(0, Retries, _),
       life_quorum(Quorum, Alive),
+      debug(paxos, 'Set: ~p -> ~p', [Key, Value]),
       collect(Quorum, false, Np, Rp, Prepare, Rps, PrepNodes),
+      debug(paxos, 'Set: quorum: 0x~16r, prepared by 0x~16r, gens ~p',
+            [Quorum, PrepNodes, Rps]),
       majority(PrepNodes, Quorum),
-      debug(paxos, 'Prepare: ~p', [Rps]),
       max_list(Rps, K),
       succ(K, K1),
       paxos_message(accept(Key,Na,K1,Ra,Value), TMO, Accept),
@@ -911,10 +992,20 @@ paxos_on_change(Key, Value, Goal) :-
     must_be(callable, Plain),
     (   Plain == ignore
     ->  unlisten(paxos_user, paxos_changed(Key,Value))
-    ;   listen(paxos_user, paxos(changed(Key,Value)),
-               thread_create(Goal, _, [detached(true)])),
+    ;   listen(paxos_user, paxos_changed(Key,Value),
+               key_changed(Key, Value, Goal)),
         paxos_initialize
     ).
+
+key_changed(_Key, _Value, Goal) :-
+    E = error(_,_),
+    catch(thread_create(Goal, _, [detached(true)]),
+          E, key_error(E)).
+
+key_error(error(permission_error(create, thread, _), _)) :-
+    !.
+key_error(E) :-
+    print_message(error, E).
 
 
 		 /*******************************
@@ -937,6 +1028,9 @@ paxos_on_change(Key, Value, Goal) :-
 %
 %   @arg TimeOut is one of `-` or a time in seconds.
 
+paxos_message(Paxos:From, TMO, Message) :-
+    paxos_message_hook(paxos(Paxos):From, TMO, Message),
+    !.
 paxos_message(Paxos, TMO, Message) :-
     paxos_message_hook(paxos(Paxos), TMO, Message),
     !.
@@ -1048,9 +1142,11 @@ ledger_learn(Key,Gen,Value) :-
 %   thread.
 
 ledger_forget(Nodes) :-
-    thread_create(ledger_forget_threaded(Nodes), _,
-                  [ detached(true)
-                  ]).
+    catch(thread_create(ledger_forget_threaded(Nodes), _,
+                        [ detached(true)
+                        ]),
+          error(permission_error(create, thread, _), _),
+          true).
 
 ledger_forget_threaded(Nodes) :-
     debug(paxos(node), 'Forgetting 0x~16r', [Nodes]),
