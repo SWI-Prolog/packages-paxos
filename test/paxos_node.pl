@@ -36,22 +36,73 @@
           [ start_node/1,                       % +Options
             (:=)/2,                             % +Key, +Value
             (<-)/2,                             % -Value, +Key
+            ledger/2,                           % ?Key, ?Value
             ledger/4                            % ?Key, ?Gen, ?Value, ?Holders
           ]).
+:- use_module(library(apply)).
+:- use_module(library(broadcast)).
+:- use_module(library(debug)).
 :- use_module(library(udp_broadcast)).
 :- use_module(library(paxos)).
+:- use_module(library(settings)).
+
+:- use_module(nodes).
+:- reexport(poor_udp).
 
 network("239.0.0.2",
         [ method(multicast)
         ]).
 
+%!  start_node(+Options)
+%
+%   Setup a paxos node using UDP networking.  Options:
+%
+%     - debug(+Topic)
+%     - nodebug(+Topic)
+%     - spy(+Pred)
+%
+%   Options are forwarded to paxos_initialize/1.
+
 start_node(Options) :-
+    setup_debug(Options),
     network(IP, NetworkOptions),
     udp_broadcast_initialize(IP,
                              [ scope(paxos)
                              | NetworkOptions
                              ]),
-    paxos_initialize(Options).
+    set_setting(paxos:max_sets, 5),
+    set_setting(paxos:response_timeout, 0.010),
+    paxos_initialize(Options),
+    paxos_on_change(Key, Value,
+                    key_changed(Key, Value)).
+
+key_changed(Key, Value) :-
+    debug(nodes(broadcast), 'Key change: ~p', [Key-Value]),
+    broadcast(nodes(changed(Key, Value))).
+
+
+setup_debug(Options) :-
+    maplist(setup_debug_, Options),
+    set_prolog_flag(message_context, [node, thread, time]).
+
+setup_debug_(debug(Topic)) :-
+    !,
+    debug(Topic).
+setup_debug_(nodebug(Topic)) :-
+    !,
+    nodebug(Topic).
+setup_debug_(spy(Spec)) :-
+    !,
+    tspy(Spec).
+setup_debug_(_).
+
+:- multifile
+    prolog:message_prefix_hook/2.
+
+prolog:message_prefix_hook(node, Prefix) :-
+    node_self(Node),
+    format(string(Prefix), '[node ~w]', [Node]).
+
 
 		 /*******************************
 		 *      PAXOS INTERACTION	*
@@ -65,10 +116,13 @@ K := V :-
 V <- K :-
     paxos_get(K, V).
 
-%!  ledger(?Key, ?Gen, ?Value, ?Holders)
+%!  ledger(?Key, ?Value) is semidet.
+%!  ledger(?Key, ?Gen, ?Value, ?Holders) is semidet.
 %
 %   Query the memory of the node, bypassing paxos_get/2.
 
+ledger(Key, Value) :-
+    paxos:paxons_ledger(Key, _Gen, Value, _Holders).
 ledger(Key, Gen, Value, Holders) :-
     paxos:paxons_ledger(Key, Gen, Value, Holders).
 

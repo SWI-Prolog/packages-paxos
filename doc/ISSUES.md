@@ -2,15 +2,15 @@
 
 ## Testing
 
-### Simulate poor network
+### Simulate poor network						[OK]
 
-  - Create an unreliable udp_receive/4?		[OK]
+  - Create an unreliable udp_receive/4?
     - Have a thread reading the socket
     - Drop some packages
     - Duplicate some packages
     - Reorder some packages.
 
-### Manage nodes
+### Manage nodes							[OK]
 
   - Have a process that adds and removes nodes.
   - Ask one or more nodes to perform an action using a TCP link

@@ -34,18 +34,32 @@
 */
 
 :- module(test_nodes,
-          [ node_create/3,              % +Address, ?Id, +Options
+          [ node_create/1,              % ?Id
+            node_create/2,              % ?Id, +Options
+            current_node/1,             % ?Id
+
+            call_on/1,                  % +Goals
             call_on/2,                  % +Node, ?Goal
+            call_on/3,                  % +Node, ?Goal, :Handler
             run_on/2,                   % +Node, +Goal
 
-            run_node/0                  % Run a client node
+            run_node/0,                 % Run a client node
+            node_self/1                 % -Id
           ]).
+:- use_module(library(apply)).
+:- use_module(library(broadcast)).
 :- use_module(library(lists)).
 :- use_module(library(debug)).
 :- use_module(library(error)).
 :- use_module(library(option)).
 :- use_module(library(unix)).
 :- use_module(library(process)).
+:- use_module(library(socket)).
+
+:- meta_predicate
+    call_on(+,+,0),
+
+    safely(0).
 
 % :- debug(nodes(connect)).
 
@@ -72,51 +86,83 @@ The nodes are connected to the controller using sockets.
     pending/4,                          % Passwd, Id, Queue, Options
     proxy_message_kind/1.
 
-%!  node_create(+Launcher, ?Id, +Options)
+%!  node_create(?Node, +Options)
 %
 %   Create a new node at address and connect it.   Options
 %
 %     - alias(Name:atom)
-%     Name of the node.
+%       Name of the node.  May also be passed as Id.
 %     - proxy_messages(+Kinds)
-%     Kinds is either a list of message kinds (see print_message/2)
-%     or one of the constants `none` or `all`.  Default is not to
-%     proxy any messages.
+%       Kinds is either a list of message kinds (see print_message/2)
+%       or one of the constants `none` or `all`.  Default is not to
+%       proxy any messages.
+%     - launcher(+Launcher)
+%       Defines how the node is created.  Currently supports
+%       - background
+%         Run as background job,  This is the default.
+%       - terminator
+%         Run using a _terminator_ terminal emulator.
 %     - async(Bool)
-%     If `true` (default `false`), do not wait for the node to become
-%     online.
+%       If `true` (default `false`), do not wait for the node to become
+%       online.
+%
+%   @arg Node is either a single node id  or a list of ids or variables.
+%   In the latter case multiple nodes are started concurrently.
 
-node_create(Launcher, Id, Options) :-
-    option(alias(Id), Options, Id),
-    default_id(Id),
-    launcher(Launcher, Id, Prog, Args),
+node_create(Id) :-
+    node_create(Id, []).
+
+node_create(Ids, Options) :-
+    is_list(Ids),
+    !,
+    maplist(default_id, Ids),
     controller,
     node_gate(_Port),
-    PasswdNum is random(1<<63),
-    number_string(PasswdNum, Passwd),
-    format(atom(PasswdOption), '--password=~w', [Passwd]),
+    start_queue(Q, Options),
+    maplist(launch(Q, Options), Ids),
+    wait_started(Q, Ids).
+node_create(Id, Options) :-
+    option(alias(Id), Options, Id),
+    default_id(Id),
+    controller,
+    node_gate(_Port),
+    start_queue(Q, Options),
+    launch(Q, Options, Id),
+    wait_started(Q, [Id]).
+
+launch(Queue, Options, Id) :-
+    option(launcher(Launcher), Options, background),
+    launcher(Launcher, Id, Prog, Args),
+    password_option(Passwd, PasswdOption),
     connect_option(ConnectOption),
     append(Args,
            [ '-g', 'run_node', file('nodes.pl'),
              ConnectOption,
              PasswdOption
            ], ProgArgs),
-    (   option(async(true), Options, false)
-    ->  Q = []
-    ;   message_queue_create(Q)
-    ),
-    asserta(pending(Passwd, Id, Q, Options)),
+    asserta(pending(Passwd, Id, Queue, Options)),
     process_create(Prog, ProgArgs,
                    [ process(Pid)
                    ]),
-    asserta(node_pid(Id, Pid)),
-    (   Q == []
-    ->  true
-    ;   thread_get_message(Q, Started),
-        (   Started == true
-        ->  true
-        ;   throw(Started)
-        )
+    asserta(node_pid(Id, Pid)).
+
+start_queue(Queue, Options) :-
+    option(async(true), Options, false),
+    !,
+    Queue = [].
+start_queue(Queue, _) :-
+    message_queue_create(Queue).
+
+wait_started([], _) :-
+    !.
+wait_started(_, []) :-
+    !.
+wait_started(Queue, Ids) :-
+    thread_get_message(Queue, Msg),
+    (   Msg = started(Id)
+    ->  selectchk(Id, Ids, Rest),
+        wait_started(Queue, Rest)
+    ;   throw(Msg)
     ).
 
 launcher(background, _,  path(swipl), []).
@@ -125,10 +171,15 @@ launcher(terminator, Id, path(terminator), ['--title', Title, '-x', 'swipl']) :-
 
 default_id(Id) :-
     var(Id),
-    !,
-    gensym(n, Id).
+    repeat,
+      gensym(n, Id),
+      \+ node(Id, _),
+      \+ node_pid(Id, _),
+    !.
 default_id(Id) :-
-    node(Id, _),
+    (   node(Id, _)
+    ;   node_pid(Id, _)
+    ),
     !,
     permission_error(alias, node, Id).
 default_id(_).
@@ -152,6 +203,14 @@ child_changed(_Sig) :-
     ;   true
     ).
 
+%!  current_node(?Id) is nondet.
+%
+%   True when Id is the identifier of a known node.
+
+current_node(Node) :-
+    node(Node, _).
+
+
 		 /*******************************
 		 *          CONTROLLER		*
 		 *******************************/
@@ -170,9 +229,15 @@ run_on(Node, Goal) :-
     run_on_(Node, Goal).
 
 run_on_(Node, Goal) :-
-    node(Node, Stream),
+    node_stream(Node, Stream),
     fast_write(Stream, call(Goal)),
     flush_output(Stream).
+
+node_stream(Node, Stream) :-
+    node(Node, Stream),
+    !.
+node_stream(Node, _) :-
+    existence_error(node, Node).
 
 
 %!  call_on(+Nodes:list, +Goal) is nondet.
@@ -193,30 +258,112 @@ call_on(Nodes, Goal) :-
     message_queue_create(Q),
     State = nodes(NodeCount),
     setup_call_cleanup(
-        asserta(queue(Id, Nodes, Q), Ref),
+        asserta(queue(Id, Nodes, q(Q)), Ref),
         ( forall(( member(Node, Nodes),
-                   node(Node, Stream)
+                   node_stream(Node, Stream)
                  ),
                  ( fast_write(Stream, call(Id, Goal, Template)),
                    flush_output(Stream)
                  )),
-          collect_replies(State, Nodes, Q, Goal, Template)
+          collect_replies(State, Q, Goal, Template)
         ),
         erase(Ref)).
 call_on(Node, Goal) :-
     term_variables(Goal, Vars),
     Template =.. [v|Vars],
-    node(Node, Stream),
+    node_stream(Node, Stream),
     call_id(Id),
     message_queue_create(Q),
     setup_call_cleanup(
-        asserta(queue(Id, Node, Q), Ref),
+        asserta(queue(Id, Node, q(Q)), Ref),
         ( fast_write(Stream, call(Id, Goal, Template)),
           flush_output(Stream),
-          thread_get_message(Q, Reply)
+          thread_get_message(Q, from(_Node, Reply))
         ),
         erase(Ref)),
     query_reply(Reply, Node, Goal, Template).
+
+%!  call_on(+Node, +Goal, :Handler)
+%
+%   Asynchronous calling. Runs Goal  on  Node   and  when  the  reply is
+%   received it runs Handler with  the   obtained  bindings.  Handler is
+%   executed in the inbound thread and should thus typically start a new
+%   thread or relay the message to a message queue.
+
+call_on(Node, Goal, Handler) :-
+    term_variables(Goal, Vars),
+    Template =.. [v|Vars],
+    node_stream(Node, Stream),
+    call_id(Id),
+    asserta(queue(Id, Node, call(Template,Handler)), Ref),
+    catch(( fast_write(Stream, call(Id, Goal, Template)),
+            flush_output(Stream)
+          ), E,
+          ( erase(Ref),
+            throw(E)
+          )).
+
+
+%!  call_on(+Tasks)
+%
+%   Submit different tasks and wait for them   to complete. Tasks are of
+%   the form `Node:Goal`. If a task fails   or  throws an exception, all
+%   variables are unified with '$NULL'.
+
+call_on(Goals) :-
+    call_id(Id),
+    message_queue_create(Q),
+    setup_call_cleanup(
+        asserta(queue(Id, [], q(Q)), Ref),
+        ( submit_goals(Goals, Id, 1, Templates),
+          collect_replies(Templates, Q)
+        ),
+        erase(Ref)).
+
+submit_goals([], _, _, []).
+submit_goals([Node:Goal|Goals], Id, I, Templates) :-
+    term_variables(Goal, Vars),
+    Template =.. [v,I|Vars],
+    I2 is I + 1,
+    (   catch(( node(Node, Stream),
+                fast_write(Stream, call(Id, Goal, Template)),
+                flush_output(Stream)
+              ), E,
+              ( print_message(warning, E),
+                fail
+              ))
+    ->  Templates = [node(Node, Template)|More],
+        submit_goals(Goals, Id, I2, More)
+    ;   submit_goals(Goals, Id, I2, Templates)
+    ).
+
+collect_replies([], _) :-
+    !.
+collect_replies(Templates, Queue) :-
+    thread_get_message(Queue, from(Node, Reply)),
+    template_reply(Reply, Node, Templates, Templates1),
+    collect_replies(Templates1, Queue).
+
+template_reply(true(Template), Node, Templates, Rest) :-
+    select(node(Node, Template), Templates, Rest),
+    !.
+template_reply(error(_E), Node, Templates, Rest) :-
+    nullify(Node, Templates, Rest).
+template_reply(false, Node, Templates, Rest) :-
+    nullify(Node, Templates, Rest).
+template_reply(end_of_file, Node, Templates, Rest) :-
+    nullify(Node, Templates, Rest).
+
+nullify(Node, Templates, Rest) :-
+    select(node(Node, Template), Templates, Rest),
+    !,
+    term_variables(Template, Vars),
+    maplist(=('$NULL'), Vars).
+
+
+%!  call_id(-Id)
+%
+%   Id is the next id to use for a call.  We simply use integers.
 
 :- dynamic
     current_query_id/1.
@@ -244,9 +391,9 @@ query_reply(end_of_file, _, halt, _) :-
 query_reply(end_of_file, Node, _, _) :-
     throw(error(node_error(Node, halted), _)).
 
-collect_replies(State, Nodes, Queue, Goal, Template) :-
+collect_replies(State, Queue, Goal, Template) :-
     repeat,
-      thread_get_message(Queue, Reply),
+      thread_get_message(Queue, from(Node, Reply)),
       arg(1, State, Left),
       Left1 is Left - 1,
       nb_setarg(1, State, Left1),
@@ -254,7 +401,7 @@ collect_replies(State, Nodes, Queue, Goal, Template) :-
       ->  !
       ;   true
       ),
-      query_reply(Reply, Nodes, Goal, Template).
+      query_reply(Reply, Node, Goal, Template).
 
 
 		 /*******************************
@@ -300,7 +447,7 @@ accept_node(Pair, Peer) :-
     flush_output(Pair),
     (   Queue == []
     ->  true
-    ;   thread_send_message(Queue, true)
+    ;   thread_send_message(Queue, started(Id))
     ).
 
 passwd_pass(Passwd, _, Id, Queue, Options) :-
@@ -313,6 +460,11 @@ passwd_pass(_, Peer, _, Queue, _) :-
                             error(permission_error(connect, node, Peer),_))
     ),
     permission_error(connect, node, Peer).
+
+password_option(Passwd, PasswdOption) :-
+    PasswdNum is random(1<<63),
+    number_string(PasswdNum, Passwd),
+    format(atom(PasswdOption), '--password=~w', [Passwd]).
 
 connect_option(Connect) :-
     gate(Gate),
@@ -331,9 +483,9 @@ run_node :-
     current_prolog_flag(argv, Argv),
     argv_options(Argv, _Rest, Options),
     debug(nodes(client), 'Running ~p', [node(Options)]),
-    node(Options).
+    run_node(Options).
 
-node(Options) :-
+run_node(Options) :-
     option(password(Password), Options),
     option(connect(Address), Options),
     atomic_list_concat([Host,PortAtom], :, Address),
@@ -355,13 +507,23 @@ run_node(Id, Stream, Options) :-
     option(proxy_messages(Proxy), Options, []),
     asserta(client(Id, Stream)),
     init_message_proxy(Proxy),
+    listen(Id, nodes(Message),
+           proxy_message(Stream, Message)),
     node_loop(Stream).
+
+proxy_message(Stream, Message) :-
+    debug(nodes(broadcast), 'Forwarding broadcast message ~p', [Message]),
+    fast_write(Stream, broadcast(Message)),
+    flush_output(Stream).
 
 node_loop(Stream) :-
     fast_read(Stream, Command),
     debug(nodes(command), 'Client got ~p', [Command]),
-    execute(Command, Stream),
-    node_loop(Stream).
+    (   Command == end_of_file
+    ->  true
+    ;   safely(execute(Command, Stream)),
+        node_loop(Stream)
+    ).
 
 execute(call(Id, Call, Template), Stream) :-
     (   catch(user:Call, E, true)
@@ -373,6 +535,8 @@ execute(call(Id, Call, Template), Stream) :-
     ),
     fast_write(Stream, reply(Id, Reply)),
     flush_output(Stream).
+execute(call(Call), _Stream) :-
+    call(Call).
 
 init_message_proxy(none) :-
     !.
@@ -400,8 +564,23 @@ message_proxy_hook(Term, Kind, Lines) :-
     fast_write(Stream, message(Term, Kind, Lines)),
     flush_output(Stream).
 
+%!  prolog:debug_print_hook(+Topic, +Format, +Args) is semidet.
+%
+%   Forward debug messages to the node controller.
 
+prolog:debug_print_hook(Topic, Format, Args) :-
+    proxy_message_kind(debug(Topic)),
+    client(_Node, Stream),
+    fast_write(Stream, debug(Topic, Format, Args)),
+    flush_output(Stream).
 
+%!  node_self(-Node) is semidet.
+%
+%   True when Node is the node id of this client node. Fails in the node
+%   manager.
+
+node_self(Node) :-
+    client(Node, _Stream).
 
 		 /*******************************
 		 *            DISPATCH		*
@@ -456,11 +635,22 @@ dispatch_term(end_of_file, Node, Set0, Set) :-
     node(Node, Stream),
     delete(Set0, Stream, Set),
     lost(Node).
-dispatch_term(reply(Magic,Term), _Node, Set, Set) :-
-    queue(Magic, _, Queue),
-    thread_send_message(Queue, Term).
+dispatch_term(reply(Magic,Term), Node, Set, Set) :-
+    queue(Magic, _, Action),
+    dispatch_reply(Action, Magic, Node, Term).
 dispatch_term(message(Term, Kind, Lines), Node, Set, Set) :-
     proxy_message(Node, Term, Kind, Lines).
+dispatch_term(debug(Topic, Format, Args), Node, Set, Set) :-
+    proxy_debug(Node, Topic, Format, Args).
+dispatch_term(broadcast(Term), Node, Set, Set) :-
+    broadcast(node(Node, Term)).
+
+dispatch_reply(q(Queue), _Magic, Node, Term) :-
+    thread_send_message(Queue, from(Node, Term)).
+dispatch_reply(call(Term,Handler), Magic, _Node, Term) :-
+    retractall(queue(Magic, _, _)),
+    safely(Handler).
+
 
 %!  proxy_message(+Node, +Term, +Kind, +Lines)
 %
@@ -488,6 +678,19 @@ prolog:message_prefix_hook(node, Prefix) :-
 dispatch_admin(join(Id), Set, [Stream|Set]) :-
     node(Id, Stream).
 
+proxy_debug(Node, Topic, Format, Args) :-
+    phrase('$messages':translate_message(debug(Format, Args)), Lines),
+    current_prolog_flag(message_context, Ctx0),
+    setup_call_cleanup(
+        ( nb_setval(message_node, Node),
+          set_prolog_flag(message_context, [node,time])
+        ),
+        print_message_lines(user_error, kind(debug(Topic)), Lines),
+        ( set_prolog_flag(message_context, Ctx0),
+          nb_delete(message_node)
+        )).
+
+
 
 %!  lost(+Node)
 %
@@ -496,8 +699,13 @@ dispatch_admin(join(Id), Set, [Stream|Set]) :-
 lost(Node) :-
     retract(node(Node, Stream)),
     close(Stream, [force(true)]),
-    forall(retract(queue(_, Node, Queue)),
-           thread_send_message(Queue, end_of_file)).
+    forall(retract(queue(_, Node, Action)),
+           lost(Action, Node)).
+
+lost(q(Queue), Node) :-
+    !,
+    thread_send_message(Queue, from(Node, end_of_file)).
+lost(_Action, _Node).
 
 
 		 /*******************************
@@ -513,3 +721,16 @@ init_node_controller :-
     set_stream(W, encoding(octet)),
     stream_pair(Pipe, R, W),
     asserta(self_channel(Pipe)).
+
+
+		 /*******************************
+		 *            UTIL		*
+		 *******************************/
+
+safely(Goal) :-
+    E = error(_,_),
+    (   catch(Goal, E,
+              print_message(warning, E))
+    ->  true
+    ;   print_message(warning, goal_failed(Goal))
+    ).
