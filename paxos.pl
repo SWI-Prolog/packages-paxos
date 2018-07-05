@@ -889,11 +889,15 @@ replicator :-
     debug(paxos(replicate), 'Starting replicator', []),
     State = state(idle),
     repeat,
-      life_quorum(Quorum),
-      (   Quorum /\ \(1<<Node) =:= 0
-      ->  debug(paxos(replicate), 'I''m alone, waiting ...', []),
+      quorum(Quorum),
+      dead(Dead),
+      LifeQuorum is Quorum /\ \Dead,
+      (   LifeQuorum /\ \(1<<Node) =:= 0
+      ->  debug(paxos(replicate),
+                'Me: ~d, Quorum: 0x~16r, Dead: 0x~16r: I''m alone, waiting ...',
+                [Node, Quorum, Dead]),
           thread_get_message(_)
-      ;   (   paxos_replicate_key(Quorum, Key, [])
+      ;   (   paxos_replicate_key(LifeQuorum, Key, [])
           ->  replicated(State, key(Key)),
               thread_self(Me),
               thread_get_message(Me, _, [timeout(ReplSleep)])
@@ -902,11 +906,6 @@ replicator :-
           )
       ),
       fail.
-
-life_quorum(LifeQuorum) :-
-    quorum(Quorum),
-    dead(Dead),
-    LifeQuorum is Quorum /\ \Dead.
 
 replicated(State, key(_Key)) :-
     arg(1, State, idle),
@@ -960,7 +959,8 @@ replication_key(Nodes, Key) :-
 
 needs_replicate(Nodes, Key) :-
     ledger_current(Key, _Gen, _Value, Holders),
-    Nodes /\ \Holders =\= 0.
+    Nodes /\ \Holders =\= 0,
+    \+ admin_key(_, Key).
 
 
 		 /*******************************
