@@ -179,6 +179,7 @@ paxos_initialize_sync(_Options) :-
     paxos_initialized,
     !.
 paxos_initialize_sync(Options) :-
+    at_halt(paxos_leave),
     listen(paxos, paxos(X), paxos_message(X)),
     paxos_assign_node(Options),
     start_replicator,
@@ -367,10 +368,9 @@ paxos_rejoin :-
 %   paxos_leave/1 version is called  to  discard   other  nodes  if they
 %   repeatedly did not respond to queries.
 
-:- at_halt(paxos_leave).
-
 paxos_leave :-
     node(Node),
+    !,
     asserta(leaving),
     paxos_leave(Node),
     Set is 1<<Node,
@@ -378,6 +378,7 @@ paxos_leave :-
     broadcast(Forget),
     unlisten(paxos),
     retractall(leaving).
+paxos_leave.
 
 paxos_leave(Node) :-
     !,
