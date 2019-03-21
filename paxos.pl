@@ -398,6 +398,8 @@ paxos_update_set(Set, How) :-
       (   Value == NewValue
       ->  true
       ;   paxos_set_admin(Set, NewValue)
+      ->  true
+      ;   leaving
       ),
     !.
 
@@ -697,6 +699,7 @@ paxos_set(Key, Value, Options) :-
     paxos_message(prepare(Key,Np,Rp,Value), TMO, Prepare),
     between(0, Retries, _),
       life_quorum(Quorum, Alive),
+      Alive \== 0,
       debug(paxos, 'Set: ~p -> ~p', [Key, Value]),
       collect(Quorum, false, Np, Rp, Prepare, Rps, PrepNodes),
       debug(paxos, 'Set: quorum: 0x~16r, prepared by 0x~16r, gens ~p',
