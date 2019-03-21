@@ -352,11 +352,13 @@ set_quorum(Node, Quorum0) :-
 paxos_rejoin :-
     node(Node),
     repeat,
-        paxos_get_admin(dead, Dead0),
-        Dead is Dead0 /\ \(1<<Node),
-        (   Dead == Dead0
-        ->  true
-        ;   paxos_set_admin(dead, Dead)
+        (   paxos_get_admin(dead, Dead0)
+        ->  Dead is Dead0 /\ \(1<<Node),
+            (   Dead == Dead0
+            ->  true
+            ;   paxos_set_admin(dead, Dead)
+            )
+        ;   true
         ),
     !.
 
