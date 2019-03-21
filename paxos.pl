@@ -131,7 +131,8 @@ identical for all attentive members of the quorum.|_
     paxos_on_change(?, ?, 0).
 
 :- multifile
-    paxos_message_hook/3.               % +PaxOS, +TimeOut, -Message
+    paxos_message_hook/3,               % +PaxOS, +TimeOut, -Message
+    paxos_ledger_hook/5.                % +Op, ?Key, ?Gen, ?Value, ?Status
 
 :- setting(max_sets, nonneg, 20,
            "Max Retries to get to an agreement").
@@ -1049,6 +1050,26 @@ paxos_message(Paxos, TMO, Message) :-
 		 *           STORAGE		*
 		 *******************************/
 
+%!  paxos_ledger_hook(+Action, ?Key, ?Gen, ?Value, ?Holders)
+%
+%   Hook called for all operations on the ledger.  Defined actions are:
+%
+%     - current
+%       Enumerate our ledger content.
+%     - get
+%       Get a single value from our ledger.
+%     - create
+%       Create a new key in our ledger.
+%     - accept
+%       Accept a new newly proposed value for a key.  Failure causes
+%       the library to send a _NACK_ message.
+%     - set
+%       Final acceptance of Ken@Gen, providing the holders that accepted
+%       the new value.
+%     - learn
+%       Accept new keys in a new node or node that has been offline for
+%       some time.
+
 :- dynamic
     paxons_ledger/4.                    % Key, Gen, Value, Holders
 
@@ -1056,6 +1077,8 @@ paxos_message(Paxos, TMO, Message) :-
 %
 %   True when Key is a known key in my ledger.
 
+ledger_current(Key, Gen, Value, Holders) :-
+    paxos_ledger_hook(current, Key, Gen, Value, Holders).
 ledger_current(Key, Gen, Value, Holders) :-
     paxons_ledger(Key, Gen, Value, Holders),
     valid(Holders).
@@ -1068,6 +1091,11 @@ ledger_current(Key, Gen, Value, Holders) :-
 %   should not use it.
 
 ledger(Key, Gen, Value) :-
+    paxos_ledger_hook(get, Key, Gen, Value0, Holders),
+    !,
+    valid(Holders),
+    Value = Value0.
+ledger(Key, Gen, Value) :-
     paxons_ledger(Key, Gen, Value0, Holders),
     valid(Holders),
     !,
@@ -1079,6 +1107,9 @@ ledger(Key, Gen, Value) :-
 %   during the preparation phase.
 
 ledger_create(Key, Gen, Value) :-
+    paxos_ledger_hook(create, Key, Gen, Value, -),
+    !.
+ledger_create(Key, Gen, Value) :-
     get_time(Now),
     asserta(paxons_ledger(Key, Gen, Value, created(Now))).
 
@@ -1087,6 +1118,9 @@ ledger_create(Key, Gen, Value) :-
 %   Update Key to Value if the  current   generation  is older than Gen.
 %   This reflects the accept phase of the protocol.
 
+ledger_update(Key, Gen, Value) :-
+    paxos_ledger_hook(accept, Key, Gen, Value, -),
+    !.
 ledger_update(Key, Gen, Value) :-
     paxons_ledger(Key, Gen0, _Value, _Holders),
     !,
@@ -1102,6 +1136,9 @@ ledger_update(Key, Gen, Value) :-
 %
 %   The leader acknowledged that Key@Gen represents a valid new
 
+ledger_update_holders(Key, Gen, Holders) :-
+    paxos_ledger_hook(set, Key, Gen, _, Holders),
+    !.
 ledger_update_holders(Key, Gen, Holders) :-
     clause(paxons_ledger(Key, Gen, Value, Holders0), true, Ref),
     !,
@@ -1128,6 +1165,9 @@ clean_key(_, Key, Gen) :-
 %
 %   We received a learn event.
 
+ledger_learn(Key,Gen,Value) :-
+    paxos_ledger_hook(learn, Key, Gen, Value, -),
+    !.
 ledger_learn(Key,Gen,Value) :-
     paxons_ledger(Key, Gen0, Value0, _Holders),
     !,
