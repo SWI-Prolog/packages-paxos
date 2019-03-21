@@ -3,7 +3,7 @@
     Author:        Jeffrey Rosenwald, Jan Wielemaker
     E-mail:        jeffrose@acm.org
     WWW:           http://www.swi-prolog.org
-    Copyright (c)  2009-2018, Jeffrey Rosenwald
+    Copyright (c)  2009-2019, Jeffrey Rosenwald
                    CWI, Amsterdam
     All rights reserved.
 
@@ -44,6 +44,8 @@
             paxos_on_change/3,                  % ?Key, ?Value, +Goal
 
             paxos_initialize/1,			% +Options
+
+            paxos_quorum_ask/4,                 % ?Templ, +Msg, -Result, +Options
                                                 % Hook support
             paxos_replicate_key/3               % +Nodes, ?Key, +Options
           ]).
@@ -145,7 +147,8 @@ identical for all attentive members of the quorum.|_
 :- setting(death_half_life, number, 10,
            "Half-time for failure score").
 :- setting(death_score, number, 100,
-           "Number of keys replicated per second").
+           "Consider a node dead if cummulative failure \c
+            score exceeds this number").
 
 
 %!  paxos_initialize(+Options) is det.
@@ -643,6 +646,9 @@ paxos_message(claim_node(Node, Ok)) :-
     ->  Ok = false
     ;   Ok = true
     ).
+paxos_message(ask(Node, Message)) :-
+    node(Node),
+    broadcast_request(Message).
 
 
 		 /*******************************
@@ -771,6 +777,25 @@ collect(Quorum, Stop, Node, Template, Message, Result, NodeSet) :-
     arg(1, State, NodeSet),
     arg(1, Answers, [_]),               % close the answer list
     L0 = [_|Result].
+
+%!  paxos_quorum_ask(?Template, +Message, -Result, +Options)
+%
+%   Ask the paxos forum for their opinion.  This predicate is not really
+%   part  of  the  paxos  protocol,  but    reuses  notably  the  quorum
+%   maintenance mechanism of this library for   asking  questions to the
+%   quorum (cluster). Message is the message to   be  asked. Result is a
+%   list of copies of Template from the quorum. Options:
+%
+%     - timeout(+Seconds)
+%       Max time to wait for a reply. Default is the setting
+%       `response_timeout`.
+
+paxos_quorum_ask(Template, Message, Result, Options) :-
+    option(timeout(TMO), Options, TMO),
+    apply_default(TMO, response_timeout),
+    life_quorum(Quorum, _Alive),
+    paxos_message(ask(Node, Message), TMO, BroadcastMessage),
+    collect(Quorum, false, Node, Template, BroadcastMessage, Result, _PrepNodes).
 
 %!  paxos_get(?Term) is semidet.
 %
@@ -1036,14 +1061,16 @@ key_error(E) :-
 %   @arg TimeOut is one of `-` or a time in seconds.
 
 paxos_message(Paxos:From, TMO, Message) :-
-    paxos_message_hook(paxos(Paxos):From, TMO, Message),
-    !.
+    paxos_message_raw(paxos(Paxos):From, TMO, Message).
 paxos_message(Paxos, TMO, Message) :-
-    paxos_message_hook(paxos(Paxos), TMO, Message),
+    paxos_message_raw(paxos(Paxos), TMO, Message).
+
+paxos_message_raw(Message, TMO, WireMessage) :-
+    paxos_message_hook(Message, TMO, WireMessage),
     !.
-paxos_message(Paxos, TMO, Message) :-
+paxos_message_raw(Message, TMO, WireMessage) :-
     throw(error(mode_error(det, fail,
-                           paxos:paxos_message_hook(Paxos, TMO, Message)), _)).
+                           paxos:paxos_message_hook(Message, TMO, WireMessage)), _)).
 
 
 		 /*******************************
