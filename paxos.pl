@@ -789,9 +789,12 @@ collect(Quorum, Stop, Node, Template, Message, Result, NodeSet) :-
 %     - timeout(+Seconds)
 %       Max time to wait for a reply. Default is the setting
 %       `response_timeout`.
+%     - node(?Node)
+%       Can be used to include the replying node into Template.
 
 paxos_quorum_ask(Template, Message, Result, Options) :-
     option(timeout(TMO), Options, TMO),
+    option(node(Node), Options, _),
     apply_default(TMO, response_timeout),
     life_quorum(Quorum, _Alive),
     paxos_message(ask(Node, Message), TMO, BroadcastMessage),
