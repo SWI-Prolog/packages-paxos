@@ -45,6 +45,7 @@
 
             paxos_initialize/1,			% +Options
 
+            paxos_property/1,                   % ?Property
             paxos_quorum_ask/4,                 % ?Templ, +Msg, -Result, +Options
                                                 % Hook support
             paxos_replicate_key/3               % +Nodes, ?Key, +Options
@@ -553,6 +554,23 @@ update(Clause) :-
     ;   asserta(Clause)
     ).
 
+%!  paxos_property(?Property)
+%
+%   True if Property is  a  current   property  for  the  paxos network.
+%   Defined properties are:
+%
+%     - node(?NodeID)
+%     - quorum(?NodeBitmap)
+%     - failed(?NodeBitmap)
+
+paxos_property(node(NodeID)) :-
+    node(NodeID).
+paxos_property(quorum(Quorum)) :-
+    quorum(Quorum).
+paxos_property(failed(Nodes)) :-
+    failed(Nodes).
+
+
 		 /*******************************
 		 *         INBOUND EVENTS	*
 		 *******************************/
@@ -749,14 +767,13 @@ intersecting(Set1, Set2) :-
 %   and NodeSet is the set (bitmask) of   Node values that replies, i.e.
 %   |NodeSet| is length(Result). The transfer stops   if  all members of
 %   the set Quorum responded or the configured timeout passed.
-%
-%   @tbd If we get a `nack` we can stop
 
 collect(Quorum, Stop, Node, Template, Message, Result, NodeSet) :-
     State = state(0),
     L0 = [dummy|_],
     Answers = list(L0),
     (   broadcast_request(Message),
+        debug(paxos(request), 'broadcast_request: ~p', [Message]),
         (   Stop
         ->  !,
             fail
@@ -791,12 +808,18 @@ collect(Quorum, Stop, Node, Template, Message, Result, NodeSet) :-
 %       `response_timeout`.
 %     - node(?Node)
 %       Can be used to include the replying node into Template.
+%     - quorum(?Quorum)
+%       Set/query the interviewed quorum as a bitmask
 
 paxos_quorum_ask(Template, Message, Result, Options) :-
     option(timeout(TMO), Options, TMO),
     option(node(Node), Options, _),
+    option(quorum(Quorum), Options, Quorum),
     apply_default(TMO, response_timeout),
-    life_quorum(Quorum, _Alive),
+    (   var(Quorum)
+    ->  life_quorum(Quorum, _Alive)
+    ;   true
+    ),
     paxos_message(ask(Node, Message), TMO, BroadcastMessage),
     collect(Quorum, false, Node, Template, BroadcastMessage, Result, _PrepNodes).
 
