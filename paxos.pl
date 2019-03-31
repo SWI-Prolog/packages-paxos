@@ -45,6 +45,7 @@
 
             paxos_initialize/1,			% +Options
 
+            paxos_admin_key/2,                  % ?Name, ?Key
             paxos_property/1,                   % ?Property
             paxos_quorum_ask/4,                 % ?Templ, +Msg, -Result, +Options
                                                 % Hook support
@@ -110,7 +111,7 @@ Paxos is a three-phase protocol:
 
    3: Finally, the coordinator concludes the successful negotiation by
    broadcasting the agreement to the quorum in the form of a
-   paxos(changed(Key,Value) event. This is the only event that
+   paxos_changed(Key,Value) event. This is the only event that
    should be of interest to user programs.
 
 For practical reasons, we rely  on   the  partially synchronous behavior
@@ -204,15 +205,15 @@ paxos_initialize :-
 %   Set administrative keys. We use a wrapper  such that we can hide the
 %   key identity.
 
-admin_key(quorum, '$paxos_quorum').
-admin_key(dead,  '$paxos_dead_nodes').
+paxos_admin_key(quorum, '$paxos_quorum').
+paxos_admin_key(dead,   '$paxos_dead_nodes').
 
 paxos_get_admin(Name, Value) :-
-    admin_key(Name, Key),
+    paxos_admin_key(Name, Key),
     paxos_get(Key, Value).
 
 paxos_set_admin(Name, Value) :-
-    admin_key(Name, Key),
+    paxos_admin_key(Name, Key),
     paxos_set(Key, Value).
 
 paxos_set_admin_bg(Name, Value) :-
@@ -499,10 +500,10 @@ life_quorum(Quorum, LifeQuorum) :-
 		 *        NETWORK STATUS	*
 		 *******************************/
 
-:- admin_key(quorum, Key),
+:- paxos_admin_key(quorum, Key),
    listen(paxos_changed(Key, Quorum),
           update_quorum(Quorum)).
-:- admin_key(dead, Key),
+:- paxos_admin_key(dead, Key),
    listen(paxos_changed(Key, Death),
           update_dead(Death)).
 
@@ -694,7 +695,7 @@ paxos_message(ask(Node, Message)) :-
 %   succeed iff the first ballot succeeds.
 %
 %   On   success,   paxos_set/1   will   also     broadcast   the   term
-%   paxos(changed(Key,Value), to the quorum.
+%   paxos_changed(Key,Value), to the quorum.
 %
 %   Options processed:
 %
@@ -1018,7 +1019,7 @@ replication_key(Nodes, Key) :-
 needs_replicate(Nodes, Key) :-
     ledger_current(Key, _Gen, _Value, Holders),
     Nodes /\ \Holders =\= 0,
-    \+ admin_key(_, Key).
+    \+ paxos_admin_key(_, Key).
 
 
 		 /*******************************
@@ -1028,8 +1029,8 @@ needs_replicate(Nodes, Key) :-
 %!  paxos_on_change(?Term, :Goal) is det.
 %!  paxos_on_change(?Key, ?Value, :Goal) is det.
 %
-%   executes the specified Goal  when   Key  changes.  paxos_on_change/2
-%   listens for paxos(changed(Key,Value) notifications   for  Key, which
+%   Executes the specified Goal  when   Key  changes.  paxos_on_change/2
+%   listens for paxos_changed(Key,Value) notifications   for  Key, which
 %   are emitted as the result   of  successful paxos_set/3 transactions.
 %   When one is received for Key, then   Goal  is executed in a separate
 %   thread of execution.
