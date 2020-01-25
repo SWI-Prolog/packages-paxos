@@ -320,7 +320,8 @@ paxos_assign_node(Options) :-
         ->  paxos_rejoin
         ;   true
         )
-    ;   debug(paxos(node), 'Node already claimed; retrying (~p)', [Node, Retry]),
+    ;   debug(paxos(node), 'Node ~p already claimed; retrying (~p)',
+              [Node, Retry]),
         retractall(node(Node)),
         fail
     ).
