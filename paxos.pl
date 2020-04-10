@@ -51,14 +51,22 @@
                                                 % Hook support
             paxos_replicate_key/3               % +Nodes, ?Key, +Options
           ]).
-:- use_module(library(broadcast)).
-:- use_module(library(debug)).
-:- use_module(library(lists)).
-:- use_module(library(settings)).
-:- use_module(library(option)).
-:- use_module(library(error)).
-:- use_module(library(apply)).
-:- use_module(library(solution_sequences)).
+:- autoload(library(apply),[partition/4,maplist/3]).
+:- autoload(library(broadcast),
+	    [ listen/3,
+	      broadcast_request/1,
+	      broadcast/1,
+	      unlisten/1,
+	      listen/2,
+	      unlisten/2
+	    ]).
+:- autoload(library(debug),[debug/3]).
+:- autoload(library(error),
+	    [permission_error/3,resource_error/1,must_be/2]).
+:- autoload(library(lists),[select/3,nth1/3,max_list/2,member/2]).
+:- autoload(library(option),[option/2,option/3]).
+:- autoload(library(solution_sequences),[call_nth/2]).
+:- use_module(library(settings),[setting/4,setting/2]).
 
 /** <module> A Replicated Data Store
 
