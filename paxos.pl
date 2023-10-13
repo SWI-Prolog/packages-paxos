@@ -60,7 +60,7 @@
 	      listen/2,
 	      unlisten/2
 	    ]).
-:- autoload(library(debug),[debug/3]).
+:- use_module(library(debug),[debug/3]).
 :- autoload(library(error),
 	    [permission_error/3,resource_error/1,must_be/2]).
 :- autoload(library(lists),[select/3,nth1/3,max_list/2,member/2]).
